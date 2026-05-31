@@ -31,6 +31,7 @@ import {
   validateSessionsResolveParams,
   validateSessionsSendParams,
 } from "../../../packages/gateway-protocol/src/index.js";
+import { readAcpSessionMeta } from "../../acp/runtime/session-meta.js";
 import { resolveModelAgentRuntimeMetadata } from "../../agents/agent-runtime-metadata.js";
 import {
   listAgentIds,
@@ -150,6 +151,7 @@ function filterSessionStoreToConfiguredAgents(
       if (isConfiguredSessionKey(key)) {
         return true;
       }
+      // Keep spawned child sessions visible when their parent belongs to a configured agent.
       return (
         isConfiguredSessionKey(entry?.spawnedBy) || isConfiguredSessionKey(entry?.parentSessionKey)
       );
@@ -799,6 +801,7 @@ function resolveSessionMessageSubscriptionKey(params: {
     : params.canonicalKey === "global" && params.defaultAgentId
       ? normalizeAgentId(params.defaultAgentId)
       : undefined;
+  // Global session message subscriptions need per-agent channels to avoid cross-agent fanout.
   return params.canonicalKey === "global" && agentId
     ? `agent:${agentId}:global`
     : params.canonicalKey;
@@ -923,6 +926,7 @@ async function interruptSessionRunIfActive(params: {
     abortEmbeddedAgentRun(params.sessionId);
   }
 
+  // Clear queued follow-up work for both requested aliases and the canonical session id.
   clearSessionQueues([params.requestedKey, params.canonicalKey, params.sessionId]);
 
   if (hasEmbeddedRun && params.sessionId) {
@@ -988,6 +992,7 @@ async function handleSessionSend(params: {
     return;
   }
   if (!entry?.sessionId && !params.interruptIfActive && isAgentMainSessionKey(cfg, canonicalKey)) {
+    // Sending to an empty agent main session should create it; steering still requires an active row.
     const created = await createAgentMainSessionForSend({
       req: params.req,
       canonicalKey,
@@ -2326,14 +2331,15 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       provider: resolved.provider,
       model: resolved.model,
     });
+    const acpMeta = readAcpSessionMeta({ sessionKey: target.canonicalKey ?? key });
     const agentRuntime = resolveModelAgentRuntimeMetadata({
       cfg,
       agentId,
       provider: resolvedDisplayModel.provider,
       model: resolvedDisplayModel.model,
       sessionKey: target.canonicalKey ?? key,
-      acpRuntime: applied.entry?.acp != null,
-      acpBackend: applied.entry?.acp?.backend,
+      acpRuntime: acpMeta != null,
+      acpBackend: acpMeta?.backend,
     });
     const result: SessionsPatchResult = {
       ok: true,
@@ -2548,7 +2554,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
             reason: "deleted",
           })
         : [];
-    const archived = archivedTranscripts.map((entry) => entry.archivedPath);
+    const archived = archivedTranscripts.map((entryLocal) => entryLocal.archivedPath);
     if (deleted) {
       emitGatewaySessionEndPluginHook({
         cfg,

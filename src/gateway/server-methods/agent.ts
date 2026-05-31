@@ -21,6 +21,7 @@ import {
   validateAgentParams,
   validateAgentWaitParams,
 } from "../../../packages/gateway-protocol/src/index.js";
+import { readAcpSessionMeta } from "../../acp/runtime/session-meta.js";
 import { listAgentIds, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import { resolveTrustedGroupId } from "../../agents/agent-tools.policy.js";
 import {
@@ -102,6 +103,7 @@ import {
   mergeDeliveryContext,
   normalizeDeliveryContext,
   normalizeSessionDeliveryFields,
+  type DeliveryContext,
 } from "../../utils/delivery-context.shared.js";
 import {
   INTERNAL_MESSAGE_CHANNEL,
@@ -415,6 +417,7 @@ async function resolveBareSessionResetResult(params: {
     cfg: params.cfg,
     agentId: params.agentId ?? resolveAgentIdFromSessionKey(params.sessionKey),
   });
+  // Main/global resets default to best-effort delivery because no caller session may remain.
   const bestEffortDeliver =
     typeof params.request.bestEffortDeliver === "boolean"
       ? params.request.bestEffortDeliver
@@ -505,6 +508,7 @@ function resolveTrustedGroupMetadata(params: {
   inherited?: TrustedGroupMetadata;
 }): TrustedGroupMetadata {
   return {
+    // Group trust can be inherited from the parent run or recovered from conversation-shaped keys.
     groupId:
       params.stored.groupId ??
       params.inherited?.groupId ??
@@ -521,6 +525,7 @@ function requestGroupMatchesTrusted(params: {
 }): boolean {
   const requestGroupId = params.requestGroupId?.trim();
   if (!requestGroupId) {
+    // Missing group metadata is accepted so non-group channels keep the same send path.
     return true;
   }
   return Boolean(params.trustedGroupId && requestGroupId === params.trustedGroupId);
@@ -545,6 +550,7 @@ function emitSessionsChanged(
           : undefined,
       )
     : null;
+  // Unscoped global updates must not leak one agent's goal into another agent's UI row.
   const omitUnscopedGlobalGoal = payload.sessionKey === "global" && !payload.agentId;
   context.broadcastToConnIds(
     "sessions.changed",
@@ -615,6 +621,52 @@ type GatewayAgentTaskTerminalStatus = Extract<
   TaskStatus,
   "succeeded" | "failed" | "timed_out" | "cancelled"
 >;
+type GatewayAgentTaskTrackingMode = "cli" | "plugin_subagent" | "none";
+
+function resolveGatewayAgentTaskTrackingMode(params: {
+  client: GatewayRequestHandlerOptions["client"];
+  sessionKey?: string;
+  inputProvenance?: InputProvenance;
+}): GatewayAgentTaskTrackingMode {
+  if (!params.sessionKey?.trim() || params.inputProvenance?.kind === "inter_session") {
+    return "none";
+  }
+  return params.client?.internal?.agentRunTracking === "plugin_subagent"
+    ? "plugin_subagent"
+    : "cli";
+}
+
+async function registerPluginSubagentRunFromGateway(params: {
+  cfg: OpenClawConfig;
+  runId: string;
+  childSessionKey: string;
+  task: string;
+  requesterOrigin?: DeliveryContext;
+  pluginId?: string;
+}): Promise<void> {
+  const childSessionKey = params.childSessionKey.trim();
+  if (!childSessionKey) {
+    return;
+  }
+  const ownerSessionKey = resolveAgentMainSessionKey({
+    cfg: params.cfg,
+    agentId: resolveAgentIdFromSessionKey(childSessionKey),
+  });
+  const { registerSubagentRun } = await import("../../agents/subagent-registry.js");
+  registerSubagentRun({
+    runId: params.runId,
+    childSessionKey,
+    controllerSessionKey: ownerSessionKey,
+    requesterSessionKey: ownerSessionKey,
+    requesterOrigin: params.requesterOrigin,
+    requesterDisplayKey: "main",
+    task: params.task,
+    cleanup: "keep",
+    ...(params.pluginId ? { label: `plugin:${params.pluginId}` } : {}),
+    expectsCompletionMessage: false,
+    spawnMode: "run",
+  });
+}
 
 function resolveFailedTrackedAgentTaskStatus(error: unknown): GatewayAgentTaskTerminalStatus {
   return isAbortError(error) || isTimeoutError(error) ? "timed_out" : "failed";
@@ -826,10 +878,9 @@ function dispatchAgentRunFromGateway(params: {
   abortController: AbortController;
   respond: GatewayRequestHandlerOptions["respond"];
   context: GatewayRequestHandlerOptions["context"];
+  taskTrackingMode: Exclude<GatewayAgentTaskTrackingMode, "plugin_subagent">;
 }) {
-  const inputProvenance = normalizeInputProvenance(params.ingressOpts.inputProvenance);
-  const shouldTrackTask =
-    params.ingressOpts.sessionKey?.trim() && inputProvenance?.kind !== "inter_session";
+  const shouldTrackTask = params.taskTrackingMode === "cli";
   if (shouldTrackTask) {
     try {
       createRunningTaskRun({
@@ -1292,7 +1343,7 @@ export const agentHandlers: GatewayRequestHandlers = {
       if (normalizedAttachments.length > 0) {
         let baseProvider: string | undefined;
         let baseModel: string | undefined;
-        let requestedSessionEntry: SessionEntry | undefined;
+        let requestedAcpMeta: ReturnType<typeof readAcpSessionMeta>;
         if (requestedSessionKeyRaw) {
           const {
             cfg: sessCfg,
@@ -1302,7 +1353,6 @@ export const agentHandlers: GatewayRequestHandlers = {
             ...(agentId ? { agentId } : {}),
             clone: false,
           });
-          requestedSessionEntry = sessEntry;
           const sessionAgentId =
             sessCanonicalKey === "global" && agentId
               ? agentId
@@ -1310,13 +1360,14 @@ export const agentHandlers: GatewayRequestHandlers = {
           const modelRef = resolveSessionModelRef(sessCfg, sessEntry, sessionAgentId);
           baseProvider = modelRef.provider;
           baseModel = modelRef.model;
+          requestedAcpMeta = readAcpSessionMeta({ sessionKey: sessCanonicalKey });
         }
         const effectiveProvider = providerOverride || baseProvider;
         const effectiveModel = modelOverride || baseModel;
         const isConfirmedAcpSession =
           request.acpTurnSource === "manual_spawn" &&
           isAcpSessionKey(requestedSessionKeyRaw) &&
-          requestedSessionEntry?.acp != null;
+          requestedAcpMeta != null;
         const supportsInlineImages = isConfirmedAcpSession
           ? true
           : await resolveGatewayModelSupportsImages({
@@ -1547,24 +1598,26 @@ export const agentHandlers: GatewayRequestHandlers = {
           ...(agentId ? { agentId } : {}),
           clone: false,
         };
-        const { cfg, storePath, entry, canonicalKey } = loadSessionEntry(
-          requestedSessionKey,
-          sessionLoadOptions,
-        );
-        cfgForAgent = cfg;
+        const {
+          cfg: cfgLocal,
+          storePath,
+          entry,
+          canonicalKey,
+        } = loadSessionEntry(requestedSessionKey, sessionLoadOptions);
+        cfgForAgent = cfgLocal;
         const sessionMaintenanceConfig = resolveMaintenanceConfigFromInput(
-          cfg.session?.maintenance,
+          cfgLocal.session?.maintenance,
         );
         const canonicalSessionAgentId =
           canonicalKey === "global"
-            ? (agentId ?? resolveDefaultAgentId(cfg))
+            ? (agentId ?? resolveDefaultAgentId(cfgLocal))
             : resolveAgentIdFromSessionKey(canonicalKey);
         const now = Date.now();
         const resetPolicy = resolveSessionResetPolicy({
-          sessionCfg: cfg.session,
+          sessionCfg: cfgLocal.session,
           resetType: resolveSessionResetType({ sessionKey: canonicalKey }),
           resetOverride: resolveChannelResetConfig({
-            sessionCfg: cfg.session,
+            sessionCfg: cfgLocal.session,
             channel: entry?.lastChannel ?? entry?.channel ?? request.channel,
           }),
         });
@@ -1638,7 +1691,7 @@ export const agentHandlers: GatewayRequestHandlers = {
           freshEntry: SessionEntry | undefined,
         ): AgentSessionPatchBuild => {
           const freshSpawnedBy = canonicalizeSpawnedByForAgent(
-            cfg,
+            cfgLocal,
             sessionAgent,
             freshEntry?.spawnedBy,
           );
@@ -1772,7 +1825,10 @@ export const agentHandlers: GatewayRequestHandlers = {
         resolvedSessionKey = canonicalSessionKey;
         const sessionAgentId = canonicalSessionAgentId;
         resolvedSessionAgentId = sessionAgentId;
-        const mainSessionKey = resolveAgentMainSessionKey({ cfg, agentId: sessionAgentId });
+        const mainSessionKey = resolveAgentMainSessionKey({
+          cfg: cfgLocal,
+          agentId: sessionAgentId,
+        });
         // Legacy stores may lack sessionStartedAt entirely. Pre-compute a
         // JSONL-transcript-derived candidate outside the store lock; the
         // updater below only writes it when the freshly-loaded store still
@@ -1800,7 +1856,7 @@ export const agentHandlers: GatewayRequestHandlers = {
             (store) => {
               const storeKeysBeforeMigration = new Set(Object.keys(store));
               const preMigrationTarget = resolveGatewaySessionStoreTarget({
-                cfg,
+                cfg: cfgLocal,
                 key: requestedStoreKey,
                 store,
                 ...(sessionAgentId ? { agentId: sessionAgentId } : {}),
@@ -1810,7 +1866,7 @@ export const agentHandlers: GatewayRequestHandlers = {
                   storeKey !== preMigrationTarget.canonicalKey && Object.hasOwn(store, storeKey),
               );
               const { target, primaryKey } = migrateAndPruneGatewaySessionStoreKey({
-                cfg,
+                cfg: cfgLocal,
                 key: requestedStoreKey,
                 store,
               });
@@ -1829,7 +1885,7 @@ export const agentHandlers: GatewayRequestHandlers = {
               const sendPolicy =
                 request.deliver === true
                   ? resolveSendPolicy({
-                      cfg,
+                      cfg: cfgLocal,
                       entry: merged,
                       sessionKey: canonicalKey,
                       channel: merged?.channel,
@@ -1884,7 +1940,7 @@ export const agentHandlers: GatewayRequestHandlers = {
         ) {
           const previousSessionId = rotatedSessionId ? entry?.sessionId : undefined;
           const sessionLifecycleTransition: AgentSendSessionLifecycleTransition = {
-            cfg,
+            cfg: cfgLocal,
             sessionKey: canonicalSessionKey,
             sessionId: resolvedSessionId,
             storePath,
@@ -1903,7 +1959,7 @@ export const agentHandlers: GatewayRequestHandlers = {
         }
         if (request.deliver === true) {
           const sendPolicy = resolveSendPolicy({
-            cfg,
+            cfg: cfgLocal,
             entry: sessionEntry,
             sessionKey: canonicalKey,
             channel: sessionEntry?.channel,
@@ -2157,6 +2213,39 @@ export const agentHandlers: GatewayRequestHandlers = {
         return;
       }
 
+      const resolvedThreadId = explicitThreadId ?? deliveryPlan.resolvedThreadId;
+      const taskTrackingMode = resolveGatewayAgentTaskTrackingMode({
+        client,
+        sessionKey: resolvedSessionKey,
+        inputProvenance,
+      });
+      let dispatchTaskTrackingMode: Exclude<GatewayAgentTaskTrackingMode, "plugin_subagent"> =
+        taskTrackingMode === "cli" ? "cli" : "none";
+      if (taskTrackingMode === "plugin_subagent" && resolvedSessionKey) {
+        try {
+          await registerPluginSubagentRunFromGateway({
+            cfg,
+            runId,
+            childSessionKey: resolvedSessionKey,
+            task: request.message.trim(),
+            requesterOrigin: normalizeDeliveryContext({
+              channel: resolvedChannel,
+              to: resolvedTo,
+              accountId: resolvedAccountId,
+              threadId: resolvedThreadId,
+            }),
+            pluginId: normalizeOptionalString(client?.internal?.pluginRuntimeOwnerId),
+          });
+        } catch (err) {
+          context.logGateway.warn(
+            `failed to register plugin subagent run ${runId}; falling back to cli task tracking: ${formatForLog(
+              err,
+            )}`,
+          );
+          dispatchTaskTrackingMode = "cli";
+        }
+      }
+
       const accepted = {
         runId,
         sessionKey: resolvedSessionKey,
@@ -2242,7 +2331,6 @@ export const agentHandlers: GatewayRequestHandlers = {
             message = annotateInterSessionPromptText(message, inputProvenance);
           }
 
-          const resolvedThreadId = explicitThreadId ?? deliveryPlan.resolvedThreadId;
           const ingressAgentId =
             resolvedSessionKey === "global"
               ? activeSessionAgentId
@@ -2360,6 +2448,7 @@ export const agentHandlers: GatewayRequestHandlers = {
             abortController: activeRunAbort.controller,
             respond,
             context,
+            taskTrackingMode: dispatchTaskTrackingMode,
           });
           dispatched = true;
         } catch (err) {

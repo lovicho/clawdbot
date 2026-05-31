@@ -106,6 +106,8 @@ async function runChannelStatusHook(params: {
   run: () => Promise<unknown>;
 }): Promise<unknown> {
   const timeoutMs = Math.max(1, params.timeoutMs);
+  // Channel probes come from plugin code and external services. Convert slow or
+  // failing hooks into partial status data so one channel cannot block the UI.
   const result = await raceWithTimeout({
     timeoutMs,
     run: params.run,
@@ -193,6 +195,8 @@ function resolveChannelGatewayAccountId(params: {
   cfg: OpenClawConfig;
   accountId?: string | null;
 }): string {
+  // Runtime operations use the same account precedence as channel setup:
+  // explicit request, plugin default, first configured account, then fallback.
   return (
     normalizeOptionalString(params.accountId) ||
     params.plugin.config.defaultAccountId?.(params.cfg) ||
@@ -210,6 +214,8 @@ export async function logoutChannelAccount(params: {
 }): Promise<ChannelLogoutPayload> {
   const resolvedAccountId = resolveChannelGatewayAccountId(params);
   const account = params.plugin.config.resolveAccount(params.cfg, resolvedAccountId);
+  // Stop the runtime before clearing channel-owned auth so no active watcher can
+  // immediately reconnect with credentials the user is trying to remove.
   await params.context.stopChannel(params.channelId, resolvedAccountId);
   const result = await params.plugin.gateway?.logoutAccount?.({
     cfg: params.cfg,
@@ -329,9 +335,9 @@ export const channelsHandlers: GatewayRequestHandlers = {
       defaultAccountId: string,
     ): ChannelAccountSnapshot | undefined => {
       const accounts = runtime.channelAccounts[channelId];
-      const defaultRuntime = runtime.channels[channelId];
+      const defaultRuntimeLocal = runtime.channels[channelId];
       const raw =
-        accounts?.[accountId] ?? (accountId === defaultAccountId ? defaultRuntime : undefined);
+        accounts?.[accountId] ?? (accountId === defaultAccountId ? defaultRuntimeLocal : undefined);
       if (!raw) {
         return undefined;
       }
@@ -356,6 +362,8 @@ export const channelsHandlers: GatewayRequestHandlers = {
       let probeResult: unknown;
       let lastProbeAt: number | null = null;
       if (probe && enabled && plugin.status?.probeAccount) {
+        // Skip expensive probes for accounts that are not configured; the
+        // snapshot builder still reports the config state below.
         let configured = true;
         if (plugin.config.isConfigured) {
           configured = await plugin.config.isConfigured(account, cfg);

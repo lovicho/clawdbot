@@ -862,6 +862,16 @@ function resolveThinkingTargetModel(state: AppViewState): {
   };
 }
 
+function sessionModelMatchesDefaults(
+  row: SessionsListResult["sessions"][number] | undefined,
+  defaults: SessionsListResult["defaults"] | undefined,
+): boolean {
+  return (
+    (!row?.modelProvider || row.modelProvider === defaults?.modelProvider) &&
+    (!row?.model || row.model === defaults?.model)
+  );
+}
+
 function buildThinkingOptions(
   levels: readonly GatewayThinkingLevelOption[],
   currentOverride: string,
@@ -900,7 +910,7 @@ function resolveThinkingLevelOptions(
   model: string | null,
   catalog: readonly ThinkingCatalogEntry[],
 ): GatewayThinkingLevelOption[] {
-  const sessionModelMatchesDefaults =
+  const sessionModelMatchesDefaultsLocal =
     (!activeRow?.modelProvider || activeRow.modelProvider === defaults?.modelProvider) &&
     (!activeRow?.model || activeRow.model === defaults?.model);
   const catalogEntry =
@@ -909,7 +919,7 @@ function resolveThinkingLevelOptions(
       : undefined;
   const explicitLevels =
     (activeRow?.thinkingLevels?.length ? activeRow.thinkingLevels : null) ??
-    (sessionModelMatchesDefaults && defaults?.thinkingLevels?.length
+    (sessionModelMatchesDefaultsLocal && defaults?.thinkingLevels?.length
       ? defaults.thinkingLevels
       : null);
   if (explicitLevels) {
@@ -920,7 +930,7 @@ function resolveThinkingLevelOptions(
   }
   const explicitLabels =
     (activeRow?.thinkingOptions?.length ? activeRow.thinkingOptions : null) ??
-    (sessionModelMatchesDefaults && defaults?.thinkingOptions?.length
+    (sessionModelMatchesDefaultsLocal && defaults?.thinkingOptions?.length
       ? defaults.thinkingOptions
       : null);
   if (catalogEntry?.reasoning === false) {
@@ -944,17 +954,22 @@ export function resolveChatThinkingSelectState(state: AppViewState): ChatThinkin
     typeof persisted === "string" && persisted.trim()
       ? (normalizeThinkLevel(persisted) ?? persisted.trim())
       : "";
+  const defaults = state.sessionsResult?.defaults;
   const { provider, model } = resolveThinkingTargetModel(state);
   const levels = resolveThinkingLevelOptions(
     activeRow,
-    state.sessionsResult?.defaults,
+    defaults,
     provider,
     model,
     state.chatModelCatalog ?? [],
   );
+  const defaultFromSessionDefaults =
+    (!activeRow || sessionModelMatchesDefaults(activeRow, defaults)) && defaults?.thinkingDefault
+      ? defaults.thinkingDefault
+      : undefined;
   const defaultLevel =
     activeRow?.thinkingDefault ??
-    state.sessionsResult?.defaults?.thinkingDefault ??
+    defaultFromSessionDefaults ??
     (provider && model
       ? resolveThinkingDefaultForModel({
           provider,

@@ -124,7 +124,8 @@ describe("package acceptance workflow", () => {
     const crabboxConfig = parse(readFileSync(CRABBOX_CONFIG, "utf8")) as {
       actions?: { job?: string };
     };
-    const workflow = readWorkflow(CRABBOX_HYDRATE_WORKFLOW);
+    const ignoredWorkflow = readWorkflow(CRABBOX_HYDRATE_WORKFLOW);
+    void ignoredWorkflow;
     const workflowText = readFileSync(CRABBOX_HYDRATE_WORKFLOW, "utf8");
     const hydrate = workflowJob(CRABBOX_HYDRATE_WORKFLOW, "hydrate");
     const hydrateWindowsDaemon = workflowJob(CRABBOX_HYDRATE_WORKFLOW, "hydrate-windows-daemon");
@@ -937,9 +938,9 @@ describe("package artifact reuse", () => {
       (step) => step.name === "Run Testbox",
     );
 
-    expect(workflow).toContain('PNPM_CONFIG_MODULES_DIR: "/tmp/openclaw-pnpm-node-modules"');
     expect(workflow).toContain('PNPM_CONFIG_STORE_DIR: "/tmp/openclaw-pnpm-store"');
-    expect(workflow).toContain('PNPM_CONFIG_VIRTUAL_STORE_DIR: "/tmp/openclaw-pnpm-virtual-store"');
+    expect(workflow).not.toContain("PNPM_CONFIG_MODULES_DIR");
+    expect(workflow).not.toContain("PNPM_CONFIG_VIRTUAL_STORE_DIR");
     expect(runTestboxStep?.uses).toContain("useblacksmith/run-testbox@");
     expect(runTestboxStep?.["continue-on-error"]).toBeUndefined();
   });

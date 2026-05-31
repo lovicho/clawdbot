@@ -635,7 +635,7 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
       },
       onStartError: (err) => {
         logTypingFailure({
-          log: (message) => runtime.error?.(danger(message)),
+          log: (messageValue) => runtime.error?.(danger(messageValue)),
           channel: "slack",
           action: "start",
           target: typingTarget,
@@ -644,7 +644,7 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
       },
       onStopError: (err) => {
         logTypingFailure({
-          log: (message) => runtime.error?.(danger(message)),
+          log: (messageLocal) => runtime.error?.(danger(messageLocal)),
           channel: "slack",
           action: "stop",
           target: typingTarget,
@@ -780,11 +780,15 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
       return;
     }
     const replyThreadTs = resolveDeliveryThreadTs(params);
+    const deliveryReplyThreadTs =
+      replyDeliveryMode === "off" && !forcedReplyThreadTs && !isThreadReply
+        ? undefined
+        : replyThreadTs;
     if (
       deliveryTracker.hasDelivered({
         kind: params.kind,
         payload: params.payload,
-        threadTs: replyThreadTs,
+        threadTs: deliveryReplyThreadTs,
       })
     ) {
       logVerbose("slack: suppressed duplicate normal delivery within the same turn");
@@ -798,7 +802,7 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
       accountId: account.accountId,
       runtime,
       textLimit: ctx.textLimit,
-      replyThreadTs,
+      replyThreadTs: deliveryReplyThreadTs,
       replyToMode: replyDeliveryMode,
       ...(slackIdentity ? { identity: slackIdentity } : {}),
       ...(slackMessageMetadata ? { metadata: slackMessageMetadata } : {}),
@@ -810,7 +814,7 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
     const deliveredThreadTs = resolveDeliveredSlackReplyThreadTs({
       replyToMode: replyDeliveryMode,
       payloadReplyToId: params.payload.replyToId,
-      replyThreadTs,
+      replyThreadTs: deliveryReplyThreadTs,
     });
     // Record the thread ts only after confirmed delivery success.
     rememberDeliveredThreadTs(params.kind, deliveredThreadTs);
@@ -818,7 +822,7 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
     deliveryTracker.markDelivered({
       kind: params.kind,
       payload: params.payload,
-      threadTs: replyThreadTs,
+      threadTs: deliveryReplyThreadTs,
     });
   };
 
@@ -1303,7 +1307,7 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
       return;
     }
     const progressLines =
-      useRichProgressDraft && previewToolProgressLines.length === 0
+      previewToolProgressLines.length === 0
         ? lastNonEmptyPreviewToolProgressLines
         : previewToolProgressLines;
     const previewText = formatChannelProgressDraftText({
@@ -1488,8 +1492,8 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
         return;
       }
       const alreadyStarted = progressDraftGate.hasStarted;
-      await progressDraftGate.noteWork();
-      if (alreadyStarted && progressDraftGate.hasStarted) {
+      const progressActive = await progressDraftGate.noteWork();
+      if ((alreadyStarted || progressActive) && progressDraftGate.hasStarted) {
         await refreshStartedProgressDraft();
       }
       return;
@@ -1529,12 +1533,15 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
         await updateNativeProgressStream();
       } else {
         await progressDraftGate.startNow();
+        if (progressDraftGate.hasStarted) {
+          await updateNativeProgressStream();
+        }
       }
       return;
     }
     const alreadyStarted = progressDraftGate.hasStarted;
-    await progressDraftGate.noteWork();
-    if (alreadyStarted && progressDraftGate.hasStarted) {
+    const progressActive = await progressDraftGate.noteWork();
+    if ((alreadyStarted || progressActive) && progressDraftGate.hasStarted) {
       await refreshStartedProgressDraft();
     }
   };
@@ -1606,7 +1613,10 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
   const onDraftBoundary = !shouldUseDraftStream
     ? undefined
     : async () => {
-        if (hasStreamedMessage) {
+        // Progress drafts are one rolling message that's finalized in place.
+        // Keep boundary cleanup, but don't clear messageId or the next update
+        // posts a new draft instead of editing the existing preview.
+        if (hasStreamedMessage && streamMode !== "status_final") {
           draftStream?.forceNewMessage();
           hasStreamedMessage = false;
           appendRenderedText = "";
