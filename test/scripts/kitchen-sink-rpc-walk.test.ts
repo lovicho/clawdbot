@@ -313,8 +313,8 @@ setInterval(() => {}, 1000);
 
     const runPromise = runCommand(process.execPath, [scriptPath, grandchildPidPath], {
       detached: undefined,
-      timeoutKillGraceMs: 50,
-      timeoutMs: 1000,
+      timeoutKillGraceMs: 25,
+      timeoutMs: 500,
     });
 
     try {
@@ -323,7 +323,7 @@ setInterval(() => {}, 1000);
       expect(Number.isInteger(grandchildPid)).toBe(true);
       expect(isProcessAlive(grandchildPid)).toBe(true);
 
-      await expect(runPromise).rejects.toThrow("timed out after 1000ms");
+      await expect(runPromise).rejects.toThrow("timed out after 500ms");
       await waitFor(() => !isProcessAlive(grandchildPid), 5_000);
     } finally {
       await runPromise.catch(() => {});
@@ -332,6 +332,42 @@ setInterval(() => {}, 1000);
       }
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("records resource samples for command process trees", async () => {
+    const samples: Array<{
+      aggregateRssMiB?: number;
+      elapsedMs?: number;
+      label?: string;
+      processId?: number;
+      rssMiB?: number;
+    }> = [];
+    const seenPids: number[] = [];
+
+    const result = await runCommand(process.execPath, ["-e", "setTimeout(() => {}, 50);"], {
+      resourceLabel: "plugins install",
+      resourceSampleIntervalMs: 1,
+      resourceSamples: samples,
+      sampleProcessImpl: async (pid: number) => {
+        seenPids.push(pid);
+        return {
+          aggregateRssMiB: 640,
+          cpuPercent: 12,
+          processId: pid + 1,
+          rssMiB: 512,
+        };
+      },
+    });
+
+    expect(result.stdout).toBe("");
+    expect(seenPids.length).toBeGreaterThan(0);
+    expect(samples[0]).toMatchObject({
+      aggregateRssMiB: 640,
+      label: "plugins install",
+      processId: seenPids[0]! + 1,
+      rssMiB: 512,
+    });
+    expect(samples[0]?.elapsedMs).toBeGreaterThanOrEqual(0);
   });
 });
 
