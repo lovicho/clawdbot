@@ -97,7 +97,9 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<v
     if (Date.now() - startedAt > timeoutMs) {
       throw new Error("Timed out waiting for condition");
     }
-    await new Promise((resolve) => scheduleNativeTimeout(resolve, 10));
+    await new Promise((resolve) => {
+      scheduleNativeTimeout(resolve, 10);
+    });
   }
 }
 
@@ -298,6 +300,11 @@ describe("QmdMemoryManager", () => {
   });
 
   beforeEach(async () => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    delete (globalThis as Record<PropertyKey, unknown>)[MCPORTER_STATE_KEY];
+    delete (globalThis as Record<PropertyKey, unknown>)[QMD_EMBED_QUEUE_KEY];
+    delete (globalThis as Record<PropertyKey, unknown>)[MEMORY_EMBEDDING_PROVIDERS_KEY];
     spawnMock.mockClear();
     spawnMock.mockImplementation(() => createMockChild());
     watchMock.mockClear();
@@ -562,6 +569,41 @@ describe("QmdMemoryManager", () => {
     await manager.close();
   });
 
+  it("logs qmd watcher errors without throwing", async () => {
+    cfg = {
+      agents: {
+        defaults: {
+          workspace: workspaceDir,
+          memorySearch: {
+            provider: "openai",
+            model: "mock-embed",
+            store: { path: path.join(workspaceDir, "index.sqlite"), vector: { enabled: false } },
+            sync: { watch: true, watchDebounceMs: 25, onSessionStart: false, onSearch: false },
+          },
+        },
+        list: [{ id: agentId, default: true, workspace: workspaceDir }],
+      },
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+
+    const { manager } = await createManager({ mode: "full" });
+    const watcher = watchMock.mock.results[0]?.value as {
+      emit: (event: string, ...args: unknown[]) => boolean;
+    };
+
+    expect(watcher.emit("error", new Error("watcher error: ENOSPC"))).toBe(true);
+    expect(logWarnMock).toHaveBeenCalledWith("qmd watcher error: watcher error: ENOSPC");
+
+    await manager.close();
+  });
+
   it("delays qmd watch sync until changed file stats settle", async () => {
     vi.useFakeTimers();
     cfg = {
@@ -723,7 +765,9 @@ describe("QmdMemoryManager", () => {
     void createPromise.then(() => {
       created = true;
     });
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
     expect(created).toBe(false);
     (releaseUpdate as (() => void) | null)?.();
     const manager = await createPromise;
@@ -731,6 +775,7 @@ describe("QmdMemoryManager", () => {
   });
 
   it("times out collection bootstrap commands", async () => {
+    vi.useFakeTimers();
     cfg = {
       ...cfg,
       memory: {
@@ -755,7 +800,15 @@ describe("QmdMemoryManager", () => {
       return createMockChild();
     });
 
-    const { manager } = await createManager({ mode: "full" });
+    const managerPromise = createManager({ mode: "full" });
+    await waitUntil(() =>
+      spawnMock.mock.calls.some((call: unknown[]) => {
+        const args = call[1] as string[];
+        return args[0] === "collection" && args[1] === "list";
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(15);
+    const { manager } = await managerPromise;
     const status = manager.status();
     expect(status.backend).toBe("qmd");
     expect(status.requestedProvider).toBe("qmd");
@@ -4387,6 +4440,7 @@ describe("QmdMemoryManager", () => {
   });
 
   it("retries boot update when qmd reports a retryable lock error", async () => {
+    vi.useFakeTimers();
     cfg = {
       ...cfg,
       memory: {
@@ -4420,26 +4474,14 @@ describe("QmdMemoryManager", () => {
       return createMockChild();
     });
 
-    const nativeSetTimeout = globalThis.setTimeout;
-    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
-      handler: TimerHandler,
-      timeout?: number,
-      ...args: unknown[]
-    ) => {
-      if (typeof timeout === "number" && timeout >= 500) {
-        return nativeSetTimeout(handler, 1, ...args);
-      }
-      return nativeSetTimeout(handler, timeout, ...args);
-    }) as typeof globalThis.setTimeout);
+    const managerPromise = createManager({ mode: "full" });
+    await waitUntil(() => updateCalls === 1);
+    await vi.advanceTimersByTimeAsync(500);
+    await waitUntil(() => updateCalls === 2);
+    const { manager } = await managerPromise;
 
-    const { manager } = await createManager({ mode: "full" });
-
-    try {
-      expect(updateCalls).toBe(2);
-      await manager.close();
-    } finally {
-      setTimeoutSpy.mockRestore();
-    }
+    expect(updateCalls).toBe(2);
+    await manager.close();
   });
 
   it("succeeds on qmd update even when stdout exceeds the output cap", async () => {

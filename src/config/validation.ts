@@ -42,9 +42,11 @@ import { findDuplicateAgentDirs, formatDuplicateAgentDirError } from "./agent-di
 import { appendAllowedValuesHint, summarizeAllowedValues } from "./allowed-values.js";
 import { GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA } from "./bundled-channel-config-metadata.generated.js";
 import { collectChannelSchemaMetadata } from "./channel-config-metadata.js";
+import { shouldSuppressMissingCodexPluginDiagnostics } from "./codex-plugin-diagnostics.js";
 import { materializeRuntimeConfig } from "./materialize.js";
 import type { OpenClawConfig, ConfigValidationIssue } from "./types.js";
 import { coerceSecretRef } from "./types.secrets.js";
+import type { MemorySearchConfig } from "./types.tools.js";
 import { isBuiltInModelProviderOverlayId } from "./zod-schema.core.js";
 import { OpenClawSchema } from "./zod-schema.js";
 
@@ -870,6 +872,88 @@ function validateGatewayTailscaleAuth(config: OpenClawConfig): ConfigValidationI
   ];
 }
 
+function isLocalGatewayMode(config: OpenClawConfig): boolean {
+  return config.gateway?.mode === "local";
+}
+
+function isMemorySearchEnabled(
+  defaults: MemorySearchConfig | undefined,
+  override: MemorySearchConfig | undefined,
+): boolean {
+  return override?.enabled ?? defaults?.enabled ?? true;
+}
+
+function isMemoryWatchEnabled(
+  defaults: MemorySearchConfig | undefined,
+  override: MemorySearchConfig | undefined,
+): boolean {
+  return override?.sync?.watch ?? defaults?.sync?.watch ?? true;
+}
+
+function hasConfiguredMemoryWatchFdPressureSurface(
+  config: OpenClawConfig,
+  defaults: MemorySearchConfig | undefined,
+  override: MemorySearchConfig | undefined,
+): boolean {
+  const hasMemorySearchConfig = Boolean(defaults || override);
+  const hasMultipleGatewayAgents = (config.agents?.list?.length ?? 0) > 1;
+  const hasQmdBackend = config.memory?.backend === "qmd";
+  const hasQmdPaths = Boolean(config.memory?.qmd?.paths?.length);
+  const hasExtraPaths = Boolean(defaults?.extraPaths?.length || override?.extraPaths?.length);
+  const hasExtraQmdCollections = Boolean(
+    defaults?.qmd?.extraCollections?.length || override?.qmd?.extraCollections?.length,
+  );
+  const hasSessionMemory = Boolean(
+    defaults?.experimental?.sessionMemory || override?.experimental?.sessionMemory,
+  );
+  return (
+    hasMemorySearchConfig ||
+    hasMultipleGatewayAgents ||
+    hasQmdBackend ||
+    hasQmdPaths ||
+    hasExtraPaths ||
+    hasExtraQmdCollections ||
+    hasSessionMemory
+  );
+}
+
+function memoryWatchFdPressureWarningMessage(): string {
+  return "Memory file watching is on for this Gateway. This keeps memory search up to date, but large memory folders, extraPaths, QMD collections, session memory, or many agents can make the Gateway keep too many files open. If you see open-file or watcher errors, set memorySearch.sync.watch: false for the affected default or agent, then use manual indexing or sync.intervalMinutes to refresh memory.";
+}
+
+function collectGatewayMemoryWatchWarnings(config: OpenClawConfig): ConfigValidationIssue[] {
+  if (!isLocalGatewayMode(config)) {
+    return [];
+  }
+  const defaults = config.agents?.defaults?.memorySearch;
+  const warnings: ConfigValidationIssue[] = [];
+  if (
+    isMemorySearchEnabled(defaults, undefined) &&
+    isMemoryWatchEnabled(defaults, undefined) &&
+    hasConfiguredMemoryWatchFdPressureSurface(config, defaults, undefined)
+  ) {
+    warnings.push({
+      path: "agents.defaults.memorySearch.sync.watch",
+      message: memoryWatchFdPressureWarningMessage(),
+    });
+  }
+  for (const [index, agent] of (config.agents?.list ?? []).entries()) {
+    const override = agent.memorySearch;
+    if (
+      override &&
+      isMemorySearchEnabled(defaults, override) &&
+      isMemoryWatchEnabled(defaults, override) &&
+      hasConfiguredMemoryWatchFdPressureSurface(config, defaults, override)
+    ) {
+      warnings.push({
+        path: `agents.list.${index}.memorySearch.sync.watch`,
+        message: memoryWatchFdPressureWarningMessage(),
+      });
+    }
+  }
+  return warnings;
+}
+
 /**
  * Validates config without applying runtime defaults.
  * Use this when you need the raw validated config (e.g., for writing back to file).
@@ -1038,16 +1122,17 @@ function validateConfigObjectWithPluginsBase(
         manifestRegistry: registryInfo?.registry,
       })
     : base.config;
+  const configWarnings = collectGatewayMemoryWatchWarnings(base.config);
   if (opts.pluginValidation === "skip") {
     return {
       ok: true,
       config,
-      warnings: [],
+      warnings: configWarnings,
     };
   }
 
   const issues: ConfigValidationIssue[] = [];
-  const warnings: ConfigValidationIssue[] = [];
+  const warnings: ConfigValidationIssue[] = [...configWarnings];
   const hasExplicitPluginsConfig = isRecord(raw) && Object.hasOwn(raw, "plugins");
   const explicitPluginReferences = collectExplicitPluginReferences(raw);
 
@@ -1724,6 +1809,13 @@ function validateConfigObjectWithPluginsBase(
       } else {
         issues.push({ path: pathLocal, message });
       }
+      return;
+    }
+    if (
+      normalizePluginId(pluginId) === "codex" &&
+      pathLocal === "plugins.entries.codex" &&
+      shouldSuppressMissingCodexPluginDiagnostics(config)
+    ) {
       return;
     }
     if (optsLocal?.warnOnly && optsLocal.officialInstallHint !== false) {

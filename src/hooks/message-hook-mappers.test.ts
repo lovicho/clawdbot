@@ -127,6 +127,57 @@ describe("message hook mappers", () => {
     expect(canonical.guildId).toBe("guild-1");
   });
 
+  it("maps inbound reply metadata into canonical and plugin payloads", () => {
+    const canonical = deriveInboundMessageHookContext(
+      makeInboundCtx({
+        ReplyToId: "discord-message-42",
+        ReplyToBody: "quoted Discord reply body",
+        ReplyToSender: "Ada",
+      }),
+    );
+
+    expect(canonical.replyToId).toBe("discord-message-42");
+    expect(canonical.replyToBody).toBe("quoted Discord reply body");
+    expect(canonical.replyToSender).toBe("Ada");
+
+    expect(toPluginMessageContext(canonical)).toMatchObject({
+      replyToId: "discord-message-42",
+      replyToBody: "quoted Discord reply body",
+      replyToSender: "Ada",
+    });
+
+    const claimContext = toPluginInboundClaimContext(canonical);
+    expect(claimContext).toMatchObject({
+      replyToId: "discord-message-42",
+      replyToBody: "quoted Discord reply body",
+      replyToSender: "Ada",
+    });
+
+    const claimEvent = toPluginInboundClaimEvent(canonical);
+    expect(claimEvent).toMatchObject({
+      replyToId: "discord-message-42",
+      replyToBody: "quoted Discord reply body",
+      replyToSender: "Ada",
+    });
+    expect(claimEvent.metadata).toMatchObject({
+      replyToId: "discord-message-42",
+      replyToBody: "quoted Discord reply body",
+      replyToSender: "Ada",
+    });
+
+    const receivedEvent = toPluginMessageReceivedEvent(canonical);
+    expect(receivedEvent).toMatchObject({
+      replyToId: "discord-message-42",
+      replyToBody: "quoted Discord reply body",
+      replyToSender: "Ada",
+    });
+    expect(receivedEvent.metadata).toMatchObject({
+      replyToId: "discord-message-42",
+      replyToBody: "quoted Discord reply body",
+      replyToSender: "Ada",
+    });
+  });
+
   it("falls back to raw body when command body is blank", () => {
     const canonical = deriveInboundMessageHookContext(
       makeInboundCtx({
@@ -305,6 +356,15 @@ describe("message hook mappers", () => {
     expect(internalMetadata?.senderUsername).toBe("userone");
     expect(internalMetadata?.senderE164).toBe("+15551234567");
     expect(internalMetadata?.topicName).toBe("Deployments");
+    expect(internalMetadata?.mediaPath).toBe("/tmp/audio.ogg");
+    expect(internalMetadata?.mediaUrl).toBe("https://cdn.example.com/audio.ogg");
+    expect(internalMetadata?.mediaType).toBe("audio/ogg");
+    expect(internalMetadata?.mediaPaths).toEqual(["/tmp/audio.ogg", "/tmp/photo.jpg"]);
+    expect(internalMetadata?.mediaUrls).toEqual([
+      "https://cdn.example.com/audio.ogg",
+      "https://cdn.example.com/photo.jpg",
+    ]);
+    expect(internalMetadata?.mediaTypes).toEqual(["audio/ogg", "image/jpeg"]);
   });
 
   it("passes frozen trace copies to inbound claim and sent plugin hooks", () => {

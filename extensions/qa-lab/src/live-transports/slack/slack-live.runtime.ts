@@ -49,7 +49,7 @@ type SlackChannelStatus = {
 
 type SlackChannelReadinessMode = "connected" | "started";
 
-const SLACK_QA_READY_TIMEOUT_MS = 45_000;
+const SLACK_QA_DEFAULT_READY_TIMEOUT_MS = 45_000;
 const SLACK_QA_READY_STABILITY_MS = 3_000;
 const SLACK_QA_GATEWAY_STOP_SETTLE_MS = 3_000;
 const SLACK_QA_RETRYABLE_SCENARIO_ATTEMPTS = 2;
@@ -949,7 +949,9 @@ async function waitForSlackScenarioReply(params: {
         { cause: error },
       );
     }
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 1_000);
+    });
   }
   throw new Error(`timed out after ${params.timeoutMs}ms waiting for Slack message`);
 }
@@ -1012,7 +1014,9 @@ async function waitForSlackNoReply(params: {
     elapsedMs = Date.now() - startedAt;
     const remainingMs = params.timeoutMs - elapsedMs;
     if (remainingMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, remainingMs)));
+      await new Promise((resolve) => {
+        setTimeout(resolve, Math.min(1_000, remainingMs));
+      });
     }
     elapsedMs = Date.now() - startedAt;
   }
@@ -1134,7 +1138,9 @@ async function waitForSlackApprovalPrompt(params: {
         observedAt: new Date().toISOString(),
       };
     }
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 1_000);
+    });
   }
   throw new Error(
     [
@@ -1202,7 +1208,9 @@ async function waitForSlackApprovalResolvedUpdate(params: {
         };
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 1_000);
+    });
   }
   throw new Error(
     `timed out after ${params.timeoutMs}ms waiting for Slack ${params.approvalKind} approval resolution update`,
@@ -1252,7 +1260,9 @@ async function waitForSlackApprovalCheckpointAck(params: {
         throw error;
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 500);
+    });
   }
   throw new Error(`timed out after ${params.timeoutMs}ms waiting for ${params.ackPath}`);
 }
@@ -1530,8 +1540,9 @@ async function waitForSlackChannelRunning(
   mode: SlackChannelReadinessMode,
 ): Promise<SlackChannelStatus> {
   const startedAt = Date.now();
+  const timeoutMs = resolveSlackQaReadyTimeoutMs();
   let lastStatus: SlackChannelStatus | undefined;
-  while (Date.now() - startedAt < SLACK_QA_READY_TIMEOUT_MS) {
+  while (Date.now() - startedAt < timeoutMs) {
     try {
       const payload = (await gateway.call(
         "channels.status",
@@ -1572,7 +1583,9 @@ async function waitForSlackChannelRunning(
     } catch {
       // retry
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 500);
+    });
   }
   throw new Error(
     `slack account "${accountId}" did not become ready` +
@@ -1586,8 +1599,9 @@ async function waitForSlackChannelStable(
   mode: SlackChannelReadinessMode,
 ) {
   const startedAt = Date.now();
+  const timeoutMs = resolveSlackQaReadyTimeoutMs();
   let readySince: number | undefined;
-  while (Date.now() - startedAt < SLACK_QA_READY_TIMEOUT_MS) {
+  while (Date.now() - startedAt < timeoutMs) {
     const status = await waitForSlackChannelRunning(gateway, accountId, mode);
     const observedAt = Date.now();
     readySince = resolveSlackChannelReadySince({
@@ -1599,9 +1613,9 @@ async function waitForSlackChannelStable(
     if (readyForMs >= SLACK_QA_READY_STABILITY_MS) {
       return;
     }
-    await new Promise((resolve) =>
-      setTimeout(resolve, Math.max(500, SLACK_QA_READY_STABILITY_MS - readyForMs)),
-    );
+    await new Promise((resolve) => {
+      setTimeout(resolve, Math.max(500, SLACK_QA_READY_STABILITY_MS - readyForMs));
+    });
   }
   throw new Error(
     `slack account "${accountId}" did not remain ready for ${SLACK_QA_READY_STABILITY_MS}ms`,
@@ -1632,6 +1646,14 @@ function resolveSlackChannelReadySince(params: {
     return params.status.lastConnectedAt;
   }
   return params.previousReadySince ?? params.observedAt;
+}
+
+function resolveSlackQaReadyTimeoutMs(env: NodeJS.ProcessEnv = process.env) {
+  const raw = env.OPENCLAW_QA_TRANSPORT_READY_TIMEOUT_MS;
+  if (!raw) {
+    return SLACK_QA_DEFAULT_READY_TIMEOUT_MS;
+  }
+  return parseStrictPositiveInteger(raw) ?? SLACK_QA_DEFAULT_READY_TIMEOUT_MS;
 }
 
 function isRetryableSlackQaScenarioError(error: unknown) {
@@ -1748,9 +1770,11 @@ async function preserveSlackGatewayDebugArtifacts(params: {
   gatewayDebugDirPath: string;
   gatewayHarness: SlackQaGatewayHarness;
 }) {
-  await params.gatewayHarness.stop({ preserveToDir: params.gatewayDebugDirPath }).catch((error) => {
-    appendLiveLaneIssue(params.cleanupIssues, "gateway debug preservation failed", error);
-  });
+  await params.gatewayHarness
+    .stop({ preserveToDir: params.gatewayDebugDirPath })
+    .catch((error: unknown) => {
+      appendLiveLaneIssue(params.cleanupIssues, "gateway debug preservation failed", error);
+    });
 }
 
 export async function runSlackQaLive(params: {
@@ -2015,10 +2039,12 @@ export async function runSlackQaLive(params: {
           break;
         } finally {
           if (!preservedGatewayDebugArtifacts && gatewayHarness) {
-            await gatewayHarness.stop().catch((error) => {
+            await gatewayHarness.stop().catch((error: unknown) => {
               appendLiveLaneIssue(cleanupIssues, "gateway stop failed", error);
             });
-            await new Promise((resolve) => setTimeout(resolve, SLACK_QA_GATEWAY_STOP_SETTLE_MS));
+            await new Promise((resolve) => {
+              setTimeout(resolve, SLACK_QA_GATEWAY_STOP_SETTLE_MS);
+            });
           }
         }
         if (scenarioResults.at(-1)?.id === scenario.id) {
@@ -2151,6 +2177,7 @@ export const testing = {
   parseSlackQaCredentialPayload,
   preserveSlackGatewayDebugArtifacts,
   resolveSlackChannelReadySince,
+  resolveSlackQaReadyTimeoutMs,
   resolveSlackApprovalCheckpointConfig,
   resolveApprovalDecision,
   resolveSlackQaRuntimeEnv,

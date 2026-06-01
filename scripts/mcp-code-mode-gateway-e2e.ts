@@ -11,6 +11,7 @@ import { stageQaMockAuthProfiles } from "../extensions/qa-lab/src/providers/shar
 import { buildQaGatewayConfig } from "../extensions/qa-lab/src/qa-gateway-config.js";
 import { resetConfigRuntimeState } from "../src/config/config.js";
 import { startGatewayServer } from "../src/gateway/server.js";
+import { countSessionLogMentions } from "./e2e/lib/session-log-mentions.ts";
 import { readBoundedResponseText } from "./lib/bounded-response.ts";
 
 const require = createRequire(import.meta.url);
@@ -93,39 +94,19 @@ function outputText(response: unknown): string {
     .join("\n");
 }
 
-function countOccurrences(haystack: string, needle: string): number {
-  if (!needle) {
-    return 0;
-  }
-  let count = 0;
-  let offset = 0;
-  while (true) {
-    const next = haystack.indexOf(needle, offset);
-    if (next < 0) {
-      return count;
-    }
-    count += 1;
-    offset = next + needle.length;
-  }
-}
-
 async function readSessionLogMentions(stateDir: string): Promise<Record<string, number>> {
   const sessionsDir = path.join(stateDir, "agents", "qa", "sessions");
-  const mentions = {
-    apiCall: 0,
-    mcpNamespace: 0,
-    mcpTool: 0,
-    toolSearchPollution: 0,
-  };
-  const files = await fs.readdir(sessionsDir).catch(() => []);
-  for (const file of files.filter((candidate) => candidate.endsWith(".jsonl"))) {
-    const raw = await fs.readFile(path.join(sessionsDir, file), "utf8").catch(() => "");
-    mentions.apiCall += countOccurrences(raw, "MCP.$api");
-    mentions.mcpNamespace += countOccurrences(raw, "MCP.fixture");
-    mentions.mcpTool += countOccurrences(raw, "fixture__lookup_note");
-    mentions.toolSearchPollution += countOccurrences(raw, 'tools.search("lookup note"');
-  }
-  return mentions;
+  return await countSessionLogMentions({
+    sessionsDir,
+    needles: {
+      apiCall: "MCP.$api",
+      apiFileList: "API.list",
+      apiFileRead: "API.read",
+      mcpNamespace: "MCP.fixture",
+      mcpTool: "fixture__lookup_note",
+      toolSearchPollution: 'tools.search("lookup note"',
+    },
+  });
 }
 
 async function writeProbeMcpServer(serverPath: string) {
@@ -297,7 +278,7 @@ export async function main() {
             content: [
               {
                 type: "input_text",
-                text: "mcp code mode qa check: inspect the MCP typed API, call the fixture lookup_note tool for alpha, and say what was unclear.",
+                text: "mcp code mode api file qa check: inspect the MCP TypeScript declaration files through API.read, call the fixture lookup_note tool for alpha, and return the note text plus what was unclear.",
               },
             ],
           },
@@ -319,9 +300,17 @@ export async function main() {
       .map((request) => request.plannedToolName)
       .filter((name): name is string => typeof name === "string");
 
-    assert(finalText.includes("MCP_CODE_MODE_OK"), "agent did not complete MCP code-mode turn");
+    assert(
+      finalText.includes("MCP_CODE_MODE_FILE_OK"),
+      "agent did not complete MCP code-mode API file turn",
+    );
+    assert(finalText.includes("fixture-note-alpha"), "agent did not return MCP fixture note");
     assert(plannedTools.includes("exec"), "agent did not call code-mode exec");
-    assert(mentions.apiCall > 0 && mentions.mcpNamespace > 0, "session log lacks MCP API usage");
+    assert(
+      mentions.apiFileRead > 0 && mentions.mcpNamespace > 0,
+      "session log lacks MCP API file usage",
+    );
+    assert(mentions.apiCall === 0, "agent should not need MCP.$api when API files are available");
     assert(mentions.mcpTool > 0, "session log lacks materialized MCP tool call");
     assert(mentions.toolSearchPollution === 0, "MCP lookup leaked through tools.search");
 

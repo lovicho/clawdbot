@@ -31,6 +31,8 @@ import {
 import { SessionWriteLockTimeoutError } from "./session-write-lock-error.js";
 import { makeModelFallbackCfg } from "./test-helpers/model-fallback-config-fixture.js";
 
+type ProviderModelNormalizationParams = { provider: string; context: { modelId: string } };
+
 vi.mock("../infra/file-lock.js", () => ({
   withFileLock: async <T>(_filePath: string, _options: unknown, run: () => Promise<T>) => run(),
 }));
@@ -40,8 +42,15 @@ vi.mock("../plugins/provider-runtime.js", () => ({
   resolveExternalAuthProfilesWithPlugins: () => [],
 }));
 
+const providerModelNormalizationMock = vi.hoisted(() => ({
+  normalizeProviderModelIdWithRuntime: vi.fn(
+    (_params: ProviderModelNormalizationParams) => undefined,
+  ),
+}));
+
 vi.mock("./provider-model-normalization.runtime.js", () => ({
-  normalizeProviderModelIdWithRuntime: () => undefined,
+  normalizeProviderModelIdWithRuntime:
+    providerModelNormalizationMock.normalizeProviderModelIdWithRuntime,
 }));
 
 const authSourceCheckMock = vi.hoisted(() => ({
@@ -186,6 +195,9 @@ function resetModelFallbackTestState(): void {
   authRuntimeMock.runtime.ensureAuthProfileStore.mockClear();
   authRuntimeMock.runtime.loadAuthProfileStoreForRuntime.mockClear();
   authSourceCheckMock.hasAnyAuthProfileStoreSource.mockReset().mockReturnValue(false);
+  providerModelNormalizationMock.normalizeProviderModelIdWithRuntime
+    .mockReset()
+    .mockReturnValue(undefined);
 }
 
 function setDefaultPluginMetadataSnapshot(): void {
@@ -1713,6 +1725,67 @@ describe("runWithModelFallback", () => {
     ]);
   });
 
+  it("does not runtime-normalize exact configured custom provider overrides or fallbacks", () => {
+    providerModelNormalizationMock.normalizeProviderModelIdWithRuntime.mockImplementation(
+      ({ provider }: ProviderModelNormalizationParams) => {
+        if (provider === "tui-pty-mock") {
+          throw new Error("custom provider should not use plugin runtime normalization");
+        }
+        return undefined;
+      },
+    );
+    const cfg = makeCfg({
+      plugins: {
+        enabled: false,
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai/gpt-4.1-mini",
+            fallbacks: ["tui-pty-mock/gpt-5.5"],
+          },
+          models: {
+            "openai/gpt-4.1-mini": {},
+            "tui-pty-mock/gpt-5.5": {},
+          },
+        },
+      },
+      models: {
+        providers: {
+          "tui-pty-mock": {
+            api: "openai-responses",
+            baseUrl: "http://127.0.0.1:9/v1",
+            apiKey: "test",
+            request: { allowPrivateNetwork: true },
+            models: [],
+          },
+        },
+      },
+    });
+
+    expect(
+      testing.resolveFallbackCandidates({
+        cfg,
+        provider: "tui-pty-mock",
+        model: "gpt-5.5",
+        fallbacksOverride: [],
+      }),
+    ).toEqual([{ provider: "tui-pty-mock", model: "gpt-5.5" }]);
+    expect(
+      testing.resolveFallbackCandidates({
+        cfg,
+        provider: "openai",
+        model: "gpt-4.1-mini",
+      }),
+    ).toEqual([
+      { provider: "openai", model: "gpt-4.1-mini" },
+      { provider: "tui-pty-mock", model: "gpt-5.5" },
+    ]);
+    expect(providerModelNormalizationMock.normalizeProviderModelIdWithRuntime).not.toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "tui-pty-mock" }),
+    );
+  });
+
   it("keeps configured fallbacks before configured primary for duplicate provider model ids", () => {
     const cfg = makeCfg({
       agents: {
@@ -1787,18 +1860,18 @@ describe("runWithModelFallback", () => {
     ]);
   });
 
-  it("normalizes prefixed Anthropic fallback candidates independently", () => {
+  it("normalizes self-prefixed fallback candidates independently", () => {
     const cfg = makeCfg({
       agents: {
         defaults: {
           model: {
-            primary: "anthropic/claude-sonnet-4-6",
-            fallbacks: ["anthropic/claude-haiku-4-5", "anthropic/claude-opus-4-7"],
+            primary: "google/gemini-2.0-flash",
+            fallbacks: ["xai/grok-4-fast-reasoning", "openai/gpt-5.4"],
           },
           models: {
-            "anthropic/claude-sonnet-4-6": {},
-            "anthropic/claude-haiku-4-5": {},
-            "anthropic/claude-opus-4-7": {},
+            "google/gemini-2.0-flash": {},
+            "xai/grok-4-fast": {},
+            "openai/gpt-5.4": {},
           },
         },
       },
@@ -1806,14 +1879,14 @@ describe("runWithModelFallback", () => {
 
     const candidates = testing.resolveFallbackCandidates({
       cfg,
-      provider: "anthropic",
-      model: "anthropic/claude-sonnet-4-6",
+      provider: "google",
+      model: "google/gemini-2.0-flash",
     });
 
     expect(candidates).toEqual([
-      { provider: "anthropic", model: "claude-sonnet-4-6" },
-      { provider: "anthropic", model: "claude-haiku-4-5" },
-      { provider: "anthropic", model: "claude-opus-4-7" },
+      { provider: "google", model: "gemini-2.0-flash" },
+      { provider: "xai", model: "grok-4-fast" },
+      { provider: "openai", model: "gpt-5.4" },
     ]);
   });
 

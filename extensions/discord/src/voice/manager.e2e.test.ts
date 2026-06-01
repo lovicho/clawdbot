@@ -2154,8 +2154,8 @@ describe("DiscordVoiceManager", () => {
 
     expect(entersStateMock).toHaveBeenCalledWith(connection, "signalling", 20_000);
     expect(entersStateMock).toHaveBeenCalledWith(connection, "connecting", 20_000);
-    expect(connection.destroy).toHaveBeenCalledTimes(1);
-    expect(manager.status()).toStrictEqual([]);
+    await vi.waitFor(() => expect(connection.destroy).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(manager.status()).toStrictEqual([]));
   });
 
   it("uses the default reconnect grace before destroying disconnected sessions", async () => {
@@ -2175,8 +2175,8 @@ describe("DiscordVoiceManager", () => {
 
     expect(entersStateMock).toHaveBeenCalledWith(connection, "signalling", 15_000);
     expect(entersStateMock).toHaveBeenCalledWith(connection, "connecting", 15_000);
-    expect(connection.destroy).toHaveBeenCalledTimes(1);
-    expect(manager.status()).toStrictEqual([]);
+    await vi.waitFor(() => expect(connection.destroy).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(manager.status()).toStrictEqual([]));
   });
 
   it("closes realtime sessions when disconnected recovery destroys the connection", async () => {
@@ -2201,9 +2201,9 @@ describe("DiscordVoiceManager", () => {
     expect(disconnected).toBeTypeOf("function");
     await disconnected?.();
 
-    expect(realtimeSessionMock.close).toHaveBeenCalledTimes(1);
-    expect(connection.destroy).toHaveBeenCalledTimes(1);
-    expect(manager.status()).toStrictEqual([]);
+    await vi.waitFor(() => expect(realtimeSessionMock.close).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(connection.destroy).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(manager.status()).toStrictEqual([]));
   });
 
   it("closes realtime sessions when Discord destroys the connection", async () => {
@@ -3865,14 +3865,18 @@ describe("DiscordVoiceManager", () => {
 
     resolveSecond?.({ payloads: [{ text: "second answer" }] });
     resolveThird?.({ payloads: [{ text: "third answer" }] });
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
     expectUserMessageNotIncludes("second answer");
     expectUserMessageNotIncludes("third answer");
 
     bridgeParams?.onEvent?.({ direction: "server", type: "response.done" });
     const firstStream = lastAudioResourceInput() as PassThrough | undefined;
     await vi.waitFor(() => expect(firstStream?.writableEnded).toBe(true));
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
     expectUserMessageNotIncludes("second answer");
 
     const idleHandler = player.on.mock.calls.find(([event]) => event === "idle")?.[1] as
@@ -3886,7 +3890,9 @@ describe("DiscordVoiceManager", () => {
     bridgeParams?.onEvent?.({ direction: "server", type: "response.done" });
     const secondStream = lastAudioResourceInput() as PassThrough | undefined;
     await vi.waitFor(() => expect(secondStream?.writableEnded).toBe(true));
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
     expectUserMessageNotIncludes("third answer");
 
     idleHandler?.();
@@ -3950,7 +3956,9 @@ describe("DiscordVoiceManager", () => {
     bridgeParams?.onEvent?.({ direction: "server", type: "response.done" });
     const firstStream = lastAudioResourceInput() as PassThrough | undefined;
     await vi.waitFor(() => expect(firstStream?.writableEnded).toBe(true));
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
     expectUserMessageNotIncludes("second answer");
 
     const idleHandler = player.on.mock.calls.find(([event]) => event === "idle")?.[1] as

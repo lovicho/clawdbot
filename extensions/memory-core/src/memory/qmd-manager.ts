@@ -479,18 +479,18 @@ export class QmdMemoryManager implements MemorySearchManager {
     if (this.qmd.update.onBoot) {
       const bootRun = this.runUpdate("boot", true);
       if (this.qmd.update.waitForBootSync) {
-        await bootRun.catch((err) => {
+        await bootRun.catch((err: unknown) => {
           log.warn(`qmd boot update failed: ${String(err)}`);
         });
       } else {
-        void bootRun.catch((err) => {
+        void bootRun.catch((err: unknown) => {
           log.warn(`qmd boot update failed: ${String(err)}`);
         });
       }
     }
     if (this.qmd.update.intervalMs > 0) {
       this.updateTimer = setInterval(() => {
-        void this.runUpdate("interval").catch((err) => {
+        void this.runUpdate("interval").catch((err: unknown) => {
           log.warn(`qmd update failed (${String(err)})`);
         });
       }, this.qmd.update.intervalMs);
@@ -498,7 +498,7 @@ export class QmdMemoryManager implements MemorySearchManager {
     if (this.shouldScheduleEmbedTimer()) {
       const startPeriodicEmbedTimer = () => {
         this.embedTimer = setInterval(() => {
-          void this.runUpdate("embed-interval").catch((err) => {
+          void this.runUpdate("embed-interval").catch((err: unknown) => {
             log.warn(`qmd embed interval update failed (${String(err)})`);
           });
         }, this.qmd.update.embedIntervalMs);
@@ -511,7 +511,7 @@ export class QmdMemoryManager implements MemorySearchManager {
             return;
           }
           void this.runUpdate("embed-interval")
-            .catch((err) => {
+            .catch((err: unknown) => {
               log.warn(`qmd embed interval update failed (${String(err)})`);
             })
             .finally(() => {
@@ -1616,6 +1616,10 @@ export class QmdMemoryManager implements MemorySearchManager {
     this.watcher.on("add", markDirty);
     this.watcher.on("change", markDirty);
     this.watcher.on("unlink", markDirty);
+    this.watcher.on("error", (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn(`qmd watcher error: ${message}`);
+    });
     this.watcher.once("ready", () => {
       log.info(
         `qmd watcher ready for agent "${this.agentId}" paths=${watchPathList.length} durationMs=${Date.now() - startTime}`,
@@ -1650,7 +1654,7 @@ export class QmdMemoryManager implements MemorySearchManager {
           return;
         }
         await this.sync({ reason: "watch" });
-      })().catch((err) => {
+      })().catch((err: unknown) => {
         log.warn(`qmd watch sync failed: ${String(err)}`);
       });
     }, this.syncSettings.watchDebounceMs);
@@ -1665,7 +1669,7 @@ export class QmdMemoryManager implements MemorySearchManager {
       return;
     }
     this.sessionWarm.add(key);
-    void this.sync({ reason: "session-start" }).catch((err) => {
+    void this.sync({ reason: "session-start" }).catch((err: unknown) => {
       log.warn(`qmd session-start sync failed: ${String(err)}`);
     });
   }
@@ -1692,7 +1696,9 @@ export class QmdMemoryManager implements MemorySearchManager {
         log.warn(
           `qmd update retry ${attempt}/${maxAttempts - 1} after failure (${reason}): ${String(err)}`,
         );
-        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, delayMs);
+        });
       }
     }
   }
@@ -2068,8 +2074,6 @@ export class QmdMemoryManager implements MemorySearchManager {
       case "vsearch":
         // Vector search only
         return [{ type: "vec", query: semanticQuery }];
-      case "query":
-      case undefined:
       default:
         // Full hybrid: lex + vec + hyde (query expansion)
         return [
@@ -2444,7 +2448,7 @@ export class QmdMemoryManager implements MemorySearchManager {
       return cached;
     }
     const db = this.ensureDb();
-    let rows: Array<{ collection: string; path: string }> = [];
+    let rows: Array<{ collection: string; path: string }>;
     try {
       rows = db
         .prepare("SELECT collection, path FROM documents WHERE hash = ? AND active = 1")
@@ -2506,7 +2510,7 @@ export class QmdMemoryManager implements MemorySearchManager {
       return null;
     }
     const exactPath = path.normalize(trimmedFile).replace(/\\/g, "/");
-    let rows: Array<{ path: string }> = [];
+    let rows: Array<{ path: string }>;
     try {
       const db = this.ensureDb();
       const exactRows = db
@@ -3049,7 +3053,9 @@ export class QmdMemoryManager implements MemorySearchManager {
     }
     await Promise.race([
       pending.catch(() => undefined),
-      new Promise<void>((resolve) => setTimeout(resolve, SEARCH_PENDING_UPDATE_WAIT_MS)),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, SEARCH_PENDING_UPDATE_WAIT_MS);
+      }),
     ]);
   }
 
