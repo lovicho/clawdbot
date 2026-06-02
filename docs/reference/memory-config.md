@@ -58,6 +58,15 @@ explicitly to use Gemini, Voyage, Mistral, DeepInfra, Bedrock, GitHub Copilot,
 Ollama, a local GGUF model, or an OpenAI-compatible `/v1/embeddings` endpoint.
 Legacy configs that still say `provider: "auto"` resolve to `openai`.
 
+<Warning>
+Changing the embedding provider, model, provider settings, sources, scope,
+chunking, or tokenizer can make the existing SQLite vector index incompatible.
+OpenClaw pauses vector search and reports an index identity warning instead of
+automatically re-embedding everything. Rebuild when you are ready with
+`openclaw memory status --index --agent <id>` or
+`openclaw memory index --force --agent <id>`.
+</Warning>
+
 If OpenAI embeddings are unreachable from your network, memory recall fails open
 instead of blocking the turn. Set the existing `memorySearch.provider` field to a
 reachable local, Ollama, regional, or OpenAI-compatible provider to restore
@@ -155,7 +164,8 @@ Use `provider: "openai-compatible"` for a generic OpenAI-compatible
     | `outputDimensionality` | `number` | `3072`                 | For Embedding 2: 768, 1536, or 3072        |
 
     <Warning>
-    Changing model or `outputDimensionality` triggers an automatic full reindex.
+    Changing model or `outputDimensionality` changes the index identity. OpenClaw
+    pauses vector search until you explicitly rebuild the memory index.
     </Warning>
 
   </Accordion>
@@ -527,9 +537,7 @@ QMD model overrides stay on the QMD side, not OpenClaw config. If you need to ov
   </Accordion>
 </AccordionGroup>
 
-QMD boot refreshes use a one-shot subprocess path during gateway startup. The long-lived QMD manager owns the regular file watcher and interval timers when memory search is opened for interactive use.
-
-Local Gateway configs can warn when memory file watching may keep too many files open. If you see open-file or watcher errors, set `sync.watch: false` for the affected agents and use manual indexing or `sync.intervalMinutes` to refresh memory.
+QMD boot refreshes use a one-shot subprocess path during gateway startup. The long-lived QMD manager still owns the regular file watcher and interval timers when memory search is opened for interactive use.
 
 ### Full QMD example
 
