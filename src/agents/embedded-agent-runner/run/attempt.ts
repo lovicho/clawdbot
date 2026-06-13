@@ -169,6 +169,11 @@ import { wrapStreamFnTextTransforms } from "../../plugin-text-transforms.js";
 import { resolveAgentPromptSurfaceForSessionKey } from "../../prompt-surface.js";
 import { describeProviderRequestRoutingSummary } from "../../provider-attribution.js";
 import { registerProviderStreamForModel } from "../../provider-stream.js";
+import {
+  AGENT_RUN_RESTART_ABORT_STOP_REASON,
+  createAgentRunRestartAbortError,
+  isAgentRunRestartAbortReason,
+} from "../../run-termination.js";
 import { collectRuntimeChannelCapabilities } from "../../runtime-capabilities.js";
 import {
   logAgentRuntimeToolDiagnostics,
@@ -316,6 +321,7 @@ import {
 } from "./attempt-trajectory-status.js";
 import {
   requiresCompletionRequiredAsyncTaskWait,
+  shouldWaitForCompletionRequiredAsyncTasks,
   waitForCompletionRequiredAsyncTasks,
   type AsyncStartedToolMeta,
   type CompletionRequiredAsyncTaskWaitResult,
@@ -1238,6 +1244,7 @@ export async function runEmbeddedAttempt(
                 : undefined,
             sessionId: params.sessionId,
             runId: params.runId,
+            oneShotCliRun: params.oneShotCliRun,
             toolSearchCatalogRef,
             agentDir,
             cwd: effectiveCwd,
@@ -1801,6 +1808,8 @@ export async function runEmbeddedAttempt(
       workspaceDir: effectiveWorkspace,
       cwd: effectiveCwd,
       runtime: {
+        sessionKey: params.sessionKey,
+        sessionId: params.sessionId,
         host: machineName,
         os: `${os.type()} ${os.release()}`,
         arch: os.arch(),
@@ -2794,6 +2803,7 @@ export async function runEmbeddedAttempt(
               mode,
               allowedToolNames: replayAllowedToolNames,
               preserveNativeAnthropicToolUseIds: transcriptPolicy.preserveNativeAnthropicToolUseIds,
+              duplicateToolCallIdStyle: transcriptPolicy.duplicateToolCallIdStyle,
               preserveReplaySafeThinkingToolCallIds: shouldAllowProviderOwnedThinkingReplay({
                 modelApi: (model as { api?: unknown })?.api as string | null | undefined,
                 provider: params.provider,
@@ -3299,6 +3309,7 @@ export async function runEmbeddedAttempt(
         buildEmbeddedSubscriptionParams({
           session: activeSession,
           runId: params.runId,
+          lifecycleGeneration: params.lifecycleGeneration,
           messageChannel: runtimeChannel,
           initialReplayState: params.initialReplayState,
           hookRunner: getGlobalHookRunner() ?? undefined,
@@ -3324,6 +3335,10 @@ export async function runEmbeddedAttempt(
           onAgentEvent: params.onAgentEvent,
           terminalLifecyclePhase: params.deferTerminalLifecycleEnd ? "finishing" : "end",
           isTerminalAborted: () => aborted,
+          resolveTerminalStopReason: () =>
+            isAgentRunRestartAbortReason(runAbortController.signal.reason)
+              ? AGENT_RUN_RESTART_ABORT_STOP_REASON
+              : undefined,
           onBeforeLifecycleTerminal: () => {
             if (
               requiresCompletionRequiredAsyncTaskWait({
@@ -3426,9 +3441,9 @@ export async function runEmbeddedAttempt(
         }
       };
 
-      const abortActiveRunExternally = () => {
+      const abortActiveRunExternally = (reason?: "user_abort" | "restart" | "superseded") => {
         externalAbort = true;
-        abortRun();
+        abortRun(false, reason === "restart" ? createAgentRunRestartAbortError() : undefined);
       };
       const queueHandle: EmbeddedAgentQueueHandle & {
         kind: "embedded";
@@ -3446,7 +3461,7 @@ export async function runEmbeddedAttempt(
         supportsTranscriptCommitWait: true,
         sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
         cancel: abortActiveRunExternally,
-        abort: abortActiveRunExternally,
+        abort: (reason) => abortActiveRunExternally(reason),
       };
       let lastAssistant: AssistantMessage | undefined;
       let currentAttemptAssistant: EmbeddedRunAttemptResult["currentAttemptAssistant"];
@@ -4570,9 +4585,10 @@ export async function runEmbeddedAttempt(
         await sessionLockController.releaseForPrompt();
 
         if (
-          requiresCompletionRequiredAsyncTaskWait({
+          shouldWaitForCompletionRequiredAsyncTasks({
             sessionKey: params.sessionKey,
             toolMetas,
+            yieldDetected: yieldAborted,
           })
         ) {
           const getAsyncStartedToolMetas = () =>
