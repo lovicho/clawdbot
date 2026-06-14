@@ -1,6 +1,7 @@
 // Tests agent runner execution setup, command args, and model fallback routing.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OAuthRefreshFailureError } from "../../agents/auth-profiles/oauth-refresh-failure.js";
+import { testing as cliBackendsTesting } from "../../agents/cli-backends.js";
 import { FailoverError } from "../../agents/failover-error.js";
 import { LiveSessionModelSwitchError } from "../../agents/live-model-switch-error.js";
 import { MissingProviderAuthError } from "../../agents/model-auth.js";
@@ -49,11 +50,57 @@ const GENERIC_RUN_FAILURE_TEXT =
   "⚠️ Something went wrong while processing your request. Please try again, or use /new to start a fresh session.";
 
 describe("resolveSessionRuntimeOverrideForProvider", () => {
+  afterEach(() => {
+    cliBackendsTesting.resetDepsForTest();
+  });
+
   it("ignores unsupported session runtime pins", () => {
     expect(
       resolveSessionRuntimeOverrideForProvider({
         provider: "openai",
         entry: { agentRuntimeOverride: "unsupported-runtime" },
+      }),
+    ).toBeUndefined();
+  });
+
+  it("keeps CLI runtime pins only when the runtime serves the selected provider", () => {
+    cliBackendsTesting.setDepsForTest({
+      resolveRuntimeCliBackends: () => [],
+      resolvePluginSetupCliBackend: ({ backend, config }) =>
+        backend === "claude-cli" && config
+          ? {
+              pluginId: "anthropic",
+              backend: {
+                id: "claude-cli",
+                modelProvider: "anthropic",
+                config: { command: "claude" },
+                bundleMcp: false,
+              },
+            }
+          : undefined,
+    });
+    const cfg = {
+      agents: {
+        defaults: {
+          cliBackends: {
+            "claude-cli": { command: "claude" },
+          },
+        },
+      },
+    };
+
+    expect(
+      resolveSessionRuntimeOverrideForProvider({
+        provider: "anthropic",
+        entry: { agentRuntimeOverride: "claude-cli" },
+        cfg,
+      }),
+    ).toBe("claude-cli");
+    expect(
+      resolveSessionRuntimeOverrideForProvider({
+        provider: "openai",
+        entry: { agentRuntimeOverride: "claude-cli" },
+        cfg,
       }),
     ).toBeUndefined();
   });
@@ -183,9 +230,31 @@ vi.mock("./agent-runner-utils.js", () => ({
   buildEmbeddedRunExecutionParams: (params: {
     provider: string;
     model: string;
-    run: { provider?: string; authProfileId?: string; authProfileIdSource?: "auto" | "user" };
+    run: {
+      provider?: string;
+      authProfileId?: string;
+      authProfileIdSource?: "auto" | "user";
+      agentAccountId?: string;
+      chatType?: string;
+    };
+    replyRoute?: {
+      originatingChannel?: string;
+      originatingTo?: string;
+      originatingAccountId?: string;
+      originatingChatType?: string;
+    };
+    sessionCtx: { AccountId?: string; ChatType?: string };
   }) => ({
-    embeddedContext: {},
+    embeddedContext: {
+      messageProvider: params.replyRoute?.originatingChannel,
+      messageTo: params.replyRoute?.originatingTo,
+      agentAccountId:
+        params.replyRoute?.originatingAccountId ??
+        params.sessionCtx.AccountId ??
+        params.run.agentAccountId,
+      chatType:
+        params.replyRoute?.originatingChatType ?? params.sessionCtx.ChatType ?? params.run.chatType,
+    },
     senderContext: {},
     runBaseParams: {
       provider: params.provider,
@@ -340,8 +409,10 @@ function createMockReplyOperation(): {
       updateSessionId: updateSessionIdMock,
       attachBackend: vi.fn(),
       detachBackend: vi.fn(),
+      retainFailureUntilComplete: vi.fn(),
       complete: vi.fn(),
       completeThen: vi.fn((afterClear: () => void) => afterClear()),
+      completeWithAfterClearBarrier: vi.fn(),
       fail: failMock,
       abortByUser: vi.fn(),
       abortForRestart: vi.fn(),
@@ -1204,6 +1275,36 @@ describe("runAgentTurnWithFallback", () => {
     expect(fallbackCall.abortSignal).toBe(replyOperation.abortSignal);
     expect(fallbackCall.sessionId).toBe("session");
     expect(embeddedCall.abortSignal).toBe(replyOperation.abortSignal);
+  });
+
+  it("passes the hydrated run account to embedded execution", async () => {
+    state.runEmbeddedAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "ok" }],
+      meta: {},
+    });
+    const followupRun = createFollowupRun();
+    followupRun.run.agentAccountId = "work";
+    followupRun.originatingChannel = "slack";
+    followupRun.originatingTo = "user:U1";
+    followupRun.originatingAccountId = "work";
+    followupRun.originatingChatType = "direct";
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    await runAgentTurnWithFallback(
+      createMinimalRunAgentTurnParams({
+        followupRun,
+        sessionCtx: {
+          Provider: "cron-event",
+        },
+      }),
+    );
+
+    expectMockCallArgFields(state.runEmbeddedAgentMock, 0, "embedded run params", {
+      messageProvider: "slack",
+      messageTo: "user:U1",
+      agentAccountId: "work",
+      chatType: "direct",
+    });
   });
 
   it("registers run ownership before asynchronous image preflight", async () => {

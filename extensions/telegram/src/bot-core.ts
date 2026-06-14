@@ -40,6 +40,7 @@ import { resolveDefaultAgentId } from "./bot.agent.runtime.js";
 import { apiThrottler, Bot, sequentialize, type ApiClientOptions } from "./bot.runtime.js";
 import type { TelegramBotOptions } from "./bot.types.js";
 import { buildTelegramGroupPeerId, resolveTelegramStreamMode } from "./bot/helpers.js";
+import { setTelegramCallbackQueryAnswerPromise } from "./callback-query-answer-state.js";
 import {
   asTelegramClientFetch,
   createTelegramClientFetch,
@@ -249,6 +250,20 @@ export function createTelegramBotCore(
     }
   });
 
+  // Answer callback queries immediately before sequentialize queues them behind
+  // agent turns for the same chat/topic. Telegram has a ~15s server-side timeout
+  // for answerCallbackQuery; if an agent turn is already processing, sequentialize
+  // delays the answer beyond that window and the user sees a stuck loading spinner.
+  bot.use(async (ctx, next) => {
+    const callback = ctx.callbackQuery;
+    if (callback) {
+      const answerPromise = bot.api.answerCallbackQuery(callback.id);
+      setTelegramCallbackQueryAnswerPromise(ctx, answerPromise);
+      void answerPromise.catch(() => {});
+    }
+    await next();
+  });
+
   bot.use(botRuntime.sequentialize(getTelegramSequentialKey));
 
   const rawUpdateLogger = createSubsystemLogger("gateway/channels/telegram/raw-update");
@@ -368,7 +383,7 @@ export function createTelegramBotCore(
     return resolveTelegramScopedGroupConfig(freshTelegramCfg, chatId, messageThreadId);
   };
 
-  // Global sendChatAction handler with 401 backoff / circuit breaker (issue #27092).
+  // Global sendChatAction handler with 401 backoff and transient cooldown.
   // Created BEFORE the message processor so it can be injected into every message context.
   // Shared across all message contexts for this account so that consecutive 401s
   // from ANY chat are tracked together — prevents infinite retry storms.
