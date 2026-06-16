@@ -365,8 +365,16 @@ export function runCommand(command, args, options = {}) {
           ? `timed out after ${timeoutMs}ms`
           : `failed with ${signal || status}`;
         reject(
-          new Error(
-            `${command} ${args.join(" ")} ${failure}${detail ? `\n${tailText(detail)}` : ""}`,
+          Object.assign(
+            new Error(
+              `${command} ${args.join(" ")} ${failure}${detail ? `\n${tailText(detail)}` : ""}`,
+            ),
+            {
+              signal,
+              status,
+              stderr: stderr.text,
+              stdout: stdout.text,
+            },
           ),
         );
       });
@@ -441,6 +449,38 @@ function parseJsonOutput(stdout) {
     }
   }
   throw new Error(`JSON output was not parseable:\n${tailText(trimmed)}`);
+}
+
+export function parseGatewayCliRequestFailure(error) {
+  if (typeof error?.stdout !== "string" || !error.stdout.trim()) {
+    return null;
+  }
+  let payload;
+  try {
+    payload = parseJsonOutput(error.stdout);
+  } catch {
+    return null;
+  }
+  const requestError = payload?.ok === false ? payload.error : null;
+  if (
+    requestError?.type !== "gateway_request_error" ||
+    !isNonEmptyString(requestError.code) ||
+    !isNonEmptyString(requestError.message) ||
+    typeof requestError.retryable !== "boolean" ||
+    (requestError.retryAfterMs !== undefined &&
+      (typeof requestError.retryAfterMs !== "number" ||
+        !Number.isInteger(requestError.retryAfterMs) ||
+        requestError.retryAfterMs < 0))
+  ) {
+    return null;
+  }
+  return Object.assign(new Error(requestError.message), {
+    name: "GatewayClientRequestError",
+    gatewayCode: requestError.code,
+    ...(requestError.details !== undefined ? { details: requestError.details } : {}),
+    retryable: requestError.retryable,
+    ...(requestError.retryAfterMs !== undefined ? { retryAfterMs: requestError.retryAfterMs } : {}),
+  });
 }
 
 function boundedJsonPreview(value, space) {
@@ -632,25 +672,30 @@ async function importCallGatewayModule() {
 
 async function rpcCallViaCli(method, params, options) {
   const config = resolveKitchenSinkRpcConfig(options.env);
-  const { stdout } = await runOpenClaw(
-    options.runner,
-    [
-      "gateway",
-      "call",
-      method,
-      "--url",
-      `ws://127.0.0.1:${options.port}`,
-      "--token",
-      TOKEN,
-      "--timeout",
-      String(config.rpcTimeoutMs),
-      "--json",
-      "--params",
-      JSON.stringify(params ?? {}),
-    ],
-    options.env,
-    createRpcCliRunOptions(method, options),
-  );
+  let stdout;
+  try {
+    ({ stdout } = await runOpenClaw(
+      options.runner,
+      [
+        "gateway",
+        "call",
+        method,
+        "--url",
+        `ws://127.0.0.1:${options.port}`,
+        "--token",
+        TOKEN,
+        "--timeout",
+        String(config.rpcTimeoutMs),
+        "--json",
+        "--params",
+        JSON.stringify(params ?? {}),
+      ],
+      options.env,
+      createRpcCliRunOptions(method, options),
+    ));
+  } catch (error) {
+    throw parseGatewayCliRequestFailure(error) ?? error;
+  }
   return parseJsonOutput(stdout);
 }
 
@@ -1399,10 +1444,7 @@ export async function assertOperatorRpcDenied(probe, call) {
   } catch (error) {
     const gatewayCode = error?.gatewayCode;
     const message = String(error?.message ?? "");
-    if (
-      (gatewayCode === undefined || gatewayCode === "INVALID_REQUEST") &&
-      message.includes("unauthorized role: operator")
-    ) {
+    if (gatewayCode === "INVALID_REQUEST" && message.includes("unauthorized role: operator")) {
       return;
     }
     throw error;
@@ -1698,7 +1740,7 @@ function parsePosixProcessRows(stdout) {
       const processId = Number.parseInt(pidRaw, 10);
       const parentProcessId = Number.parseInt(ppidRaw, 10);
       const rssKb = Number.parseInt(rssKbRaw, 10);
-      const cpuPercent = Number.parseFloat(cpuRaw);
+      const cpuPercent = parseStrictNonNegativeDecimal(cpuRaw);
       if (
         !Number.isInteger(processId) ||
         !Number.isInteger(parentProcessId) ||
@@ -1710,11 +1752,39 @@ function parsePosixProcessRows(stdout) {
         processId,
         parentProcessId,
         rssKb,
-        cpuPercent: Number.isFinite(cpuPercent) ? cpuPercent : null,
+        cpuPercent,
         command: command ?? "",
       };
     })
     .filter(Boolean);
+}
+
+function parseStrictNonNegativeDecimal(raw) {
+  const text = String(raw ?? "").trim();
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(text)) {
+    return null;
+  }
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseStrictUnsignedInteger(raw) {
+  const text = String(raw ?? "").trim();
+  if (!/^(?:0|[1-9]\d*)$/u.test(text)) {
+    return null;
+  }
+  const parsed = Number(text);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function parseTasklistMemoryKiB(raw) {
+  const text = String(raw ?? "").trim();
+  const match = text.match(/^((?:0|[1-9]\d*)|(?:[1-9]\d{0,2}(?:,\d{3})+))\s*K$/iu);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number(match[1].replaceAll(",", ""));
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function collectPosixProcessTree(rows, rootPid) {
@@ -1805,16 +1875,16 @@ async function sampleWindowsPidWithTasklist(pid, run) {
     const tasklistFields = parseTasklistCsvLine(line);
     const processIdRaw = tasklistFields[1];
     const memoryRaw = tasklistFields[4];
-    const processId = Number.parseInt(processIdRaw ?? "", 10);
-    const memoryKiB = Number.parseInt((memoryRaw ?? "").replace(/[^\d]/gu, ""), 10);
-    if (!Number.isFinite(memoryKiB)) {
+    const processId = parseStrictUnsignedInteger(processIdRaw);
+    const memoryKiB = parseTasklistMemoryKiB(memoryRaw);
+    if (memoryKiB === null) {
       return null;
     }
     return {
       rssMiB: Math.round((memoryKiB / 1024) * 10) / 10,
       cpuPercent: null,
       cpuSeconds: null,
-      processId: Number.isFinite(processId) ? processId : safePid,
+      processId: processId ?? safePid,
     };
   } catch {
     return null;
@@ -1832,8 +1902,7 @@ export async function sampleWindowsProcessByPort(port, options = {}) {
     const pid = stdout
       .split(/\r?\n/u)
       .map((line) => line.trim())
-      .filter((line) => line.includes(`:${safePort}`) && /\bLISTENING\b/iu.test(line))
-      .map((line) => Number.parseInt(line.split(/\s+/u).at(-1) ?? "", 10))
+      .map((line) => parseWindowsNetstatListeningPid(line, safePort))
       .find((candidate) => Number.isInteger(candidate) && candidate > 0);
     if (!pid) {
       return null;
@@ -1842,6 +1911,19 @@ export async function sampleWindowsProcessByPort(port, options = {}) {
   } catch {
     return null;
   }
+}
+
+function parseWindowsNetstatListeningPid(line, port) {
+  if (!/\bLISTENING\b/iu.test(line)) {
+    return null;
+  }
+  const fields = line.trim().split(/\s+/u);
+  const localPortMatch = fields[1]?.match(/:(\d+)$/u);
+  if (!localPortMatch || Number(localPortMatch[1]) !== port) {
+    return null;
+  }
+  const processId = Number(fields.at(-1) ?? "");
+  return Number.isSafeInteger(processId) && processId > 0 ? processId : null;
 }
 
 function powershellSingleQuoted(value) {
@@ -1886,24 +1968,24 @@ async function sampleWindowsProcess(pid, run, commandLineNeedles = []) {
       const [workingSetBytesRaw, cpuSecondsRaw, processIdRaw, aggregateWorkingSetBytesRaw] = stdout
         .trim()
         .split(/\s+/u);
-      const workingSetBytes = Number.parseInt(workingSetBytesRaw ?? "", 10);
-      const aggregateWorkingSetBytes = Number.parseInt(
+      const workingSetBytes = parseStrictUnsignedInteger(workingSetBytesRaw);
+      const aggregateWorkingSetBytes = parseStrictUnsignedInteger(
         aggregateWorkingSetBytesRaw ?? workingSetBytesRaw ?? "",
-        10,
       );
-      const cpuSeconds = Number.parseFloat(cpuSecondsRaw ?? "");
-      const processId = Number.parseInt(processIdRaw ?? "", 10);
-      if (!Number.isFinite(workingSetBytes)) {
+      const cpuSeconds = parseStrictNonNegativeDecimal(cpuSecondsRaw);
+      const processId = parseStrictUnsignedInteger(processIdRaw);
+      if (workingSetBytes === null) {
         return null;
       }
       return {
         rssMiB: Math.round((workingSetBytes / 1024 / 1024) * 10) / 10,
-        aggregateRssMiB: Number.isFinite(aggregateWorkingSetBytes)
-          ? Math.round((aggregateWorkingSetBytes / 1024 / 1024) * 10) / 10
-          : Math.round((workingSetBytes / 1024 / 1024) * 10) / 10,
+        aggregateRssMiB:
+          aggregateWorkingSetBytes !== null
+            ? Math.round((aggregateWorkingSetBytes / 1024 / 1024) * 10) / 10
+            : Math.round((workingSetBytes / 1024 / 1024) * 10) / 10,
         cpuPercent: null,
-        cpuSeconds: Number.isFinite(cpuSeconds) ? cpuSeconds : null,
-        processId: Number.isFinite(processId) ? processId : safePid,
+        cpuSeconds,
+        processId: processId ?? safePid,
       };
     } catch {
       // Try the next Windows PowerShell command name.
