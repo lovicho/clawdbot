@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  findGatewaySessionCreateLifecycleViolations,
   findSessionAccessorBoundaryViolations,
   findSessionAccessorWriteBoundaryViolations,
   findTranscriptWriterBoundaryViolations,
@@ -38,6 +39,7 @@ describe("session accessor boundary guard", () => {
         "src/gateway/sessions-resolve.ts",
         "src/gateway/server-methods/sessions.ts",
         "src/infra/outbound/message-action-tts.ts",
+        "src/tui/embedded-backend.ts",
       ]),
     );
   });
@@ -76,6 +78,7 @@ describe("session accessor boundary guard", () => {
         "src/auto-reply/reply/session-reset-model.ts",
         "src/auto-reply/reply/session-updates.ts",
         "src/auto-reply/reply/session-usage.ts",
+        "src/tui/embedded-backend.ts",
       ]),
     );
   });
@@ -235,6 +238,40 @@ describe("session accessor boundary guard", () => {
         import { appendTranscriptMessage, publishTranscriptUpdate } from "../config/sessions/session-accessor.js";
         appendTranscriptMessage(scope, { message });
         publishTranscriptUpdate(scope, { messageId });
+      `),
+    ).toEqual([]);
+  });
+
+  it("flags legacy writers inside the gateway sessions.create lifecycle", () => {
+    expect(
+      findGatewaySessionCreateLifecycleViolations(`
+        const handlers = {
+          "sessions.create": async () => {
+            await updateSessionStore(storePath, () => undefined);
+            ensureSessionTranscriptFile(params);
+          },
+          "sessions.patch": async () => {
+            await updateSessionStore(storePath, () => undefined);
+          },
+        };
+      `),
+    ).toEqual([
+      { line: 4, reason: 'calls legacy sessions.create lifecycle writer "updateSessionStore"' },
+      {
+        line: 5,
+        reason: 'calls legacy sessions.create lifecycle writer "ensureSessionTranscriptFile"',
+      },
+    ]);
+  });
+
+  it("allows the gateway sessions.create lifecycle accessor seam", () => {
+    expect(
+      findGatewaySessionCreateLifecycleViolations(`
+        const handlers = {
+          "sessions.create": async () => {
+            await createSessionEntryWithTranscript(scope, createEntry);
+          },
+        };
       `),
     ).toEqual([]);
   });

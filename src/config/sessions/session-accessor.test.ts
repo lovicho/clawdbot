@@ -6,7 +6,9 @@ import { onSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
 import {
   appendTranscriptMessage,
   appendTranscriptEvent,
+  applySessionPatchProjection,
   cleanupSessionLifecycleArtifacts,
+  createSessionEntryWithTranscript,
   listSessionEntries,
   loadExactSessionEntry,
   loadSessionEntry,
@@ -91,6 +93,57 @@ describe("session accessor file-backed seam", () => {
     );
     expect(inserted?.sessionId).not.toBe(scope.sessionKey);
     expect(loadSessionEntry(scope)?.sessionId).toBe(inserted?.sessionId);
+  });
+
+  it("creates entries with initialized transcripts and normalized sessionFile metadata", async () => {
+    const scope = {
+      agentId: "main",
+      sessionKey: "agent:main:main",
+      storePath,
+    };
+
+    const created = await createSessionEntryWithTranscript(scope, ({ sessionEntries }) => {
+      expect(sessionEntries).toEqual({});
+      return {
+        ok: true,
+        entry: {
+          sessionId: "session-1",
+          updatedAt: 10,
+        },
+      };
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) {
+      throw new Error("expected session creation to succeed");
+    }
+    expect(path.basename(created.sessionFile)).toBe("session-1.jsonl");
+    expect(created.entry.sessionFile).toBe(created.sessionFile);
+  });
+
+  it("rolls back the entry when transcript initialization fails", async () => {
+    const scope = {
+      agentId: "main",
+      sessionKey: "agent:main:main",
+      storePath,
+    };
+    fs.writeFileSync(path.join(tempDir, "blocked"), "not a directory", "utf8");
+
+    const created = await createSessionEntryWithTranscript(scope, () => ({
+      ok: true,
+      entry: {
+        sessionFile: "blocked/session-1.jsonl",
+        sessionId: "session-1",
+        updatedAt: 10,
+      },
+    }));
+
+    expect(created).toMatchObject({
+      ok: false,
+      phase: "transcript",
+    });
+    expect(loadSessionEntry(scope)).toBeUndefined();
+    expect(loadSessionStore(storePath, { skipCache: true })[scope.sessionKey]).toBeUndefined();
   });
 
   it("can borrow cached entry objects for read-only hot paths", async () => {
@@ -268,6 +321,93 @@ describe("session accessor file-backed seam", () => {
       model: "gpt-5.5",
       sessionId: "session-1",
       updatedAt: beforePatch?.updatedAt,
+    });
+  });
+
+  it("applies projected session patches after migrating legacy candidate keys", async () => {
+    fs.writeFileSync(
+      storePath,
+      JSON.stringify({
+        "agent:main:main": {
+          sessionId: "canonical-session",
+          updatedAt: 10,
+        },
+        "AGENT:MAIN:MAIN": {
+          sessionId: "legacy-session",
+          updatedAt: 20,
+        },
+      }),
+      "utf8",
+    );
+
+    const projected = await applySessionPatchProjection({
+      storePath,
+      resolveTarget: () => ({
+        primaryKey: "agent:main:main",
+        candidateKeys: ["agent:main:main"],
+      }),
+      project: ({ entries, existingEntry, primaryKey }) => {
+        expect(primaryKey).toBe("agent:main:main");
+        expect(existingEntry?.sessionId).toBe("legacy-session");
+        expect(entries.map((entry) => entry.sessionKey)).toEqual(["agent:main:main"]);
+        return {
+          ok: true as const,
+          entry: {
+            ...existingEntry,
+            label: "Projected",
+          } as SessionEntry,
+        };
+      },
+    });
+
+    expect(projected).toMatchObject({
+      ok: true,
+      entry: {
+        label: "Projected",
+        sessionId: "legacy-session",
+      },
+    });
+    expect(loadSessionStore(storePath)).toEqual({
+      "agent:main:main": expect.objectContaining({
+        label: "Projected",
+        sessionId: "legacy-session",
+      }),
+    });
+  });
+
+  it("persists legacy key pruning when projected session patches fail validation", async () => {
+    fs.writeFileSync(
+      storePath,
+      JSON.stringify({
+        "agent:main:main": {
+          sessionId: "canonical-session",
+          updatedAt: 10,
+        },
+        "AGENT:MAIN:MAIN": {
+          sessionId: "legacy-session",
+          updatedAt: 20,
+        },
+      }),
+      "utf8",
+    );
+
+    const projected = await applySessionPatchProjection({
+      storePath,
+      resolveTarget: () => ({
+        primaryKey: "agent:main:main",
+        candidateKeys: ["agent:main:main"],
+      }),
+      project: () => ({
+        ok: false as const,
+        error: "invalid patch",
+      }),
+    });
+
+    expect(projected).toEqual({ ok: false, error: "invalid patch" });
+    expect(loadSessionStore(storePath)).toEqual({
+      "agent:main:main": expect.objectContaining({
+        sessionId: "legacy-session",
+      }),
     });
   });
 
