@@ -858,7 +858,11 @@ describe("test-projects args", () => {
       {
         config: "test/vitest/vitest.unit-fast.config.ts",
         forwardedArgs: [],
-        includePatterns: ["src/install-sh-version.test.ts", "test/scripts/android-version.test.ts"],
+        includePatterns: [
+          "src/install-sh-version.test.ts",
+          "src/proxy-capture/store.sqlite.test.ts",
+          "test/scripts/android-version.test.ts",
+        ],
         watchMode: false,
       },
       {
@@ -887,6 +891,12 @@ describe("test-projects args", () => {
         watchMode: false,
       },
       {
+        config: "test/vitest/vitest.commands.config.ts",
+        forwardedArgs: [],
+        includePatterns: ["src/commands/status.scan.shared.test.ts"],
+        watchMode: false,
+      },
+      {
         config: "test/vitest/vitest.agents.config.ts",
         forwardedArgs: [],
         includePatterns: [
@@ -897,7 +907,10 @@ describe("test-projects args", () => {
       },
       {
         config: "test/vitest/vitest.e2e.config.ts",
-        forwardedArgs: ["test/openclaw-launcher.e2e.test.ts"],
+        forwardedArgs: [
+          "test/e2e/qa-lab/plugins/plugin-lifecycle-probe.e2e.test.ts",
+          "test/openclaw-launcher.e2e.test.ts",
+        ],
         includePatterns: null,
         watchMode: false,
       },
