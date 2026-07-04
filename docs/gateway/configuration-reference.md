@@ -612,6 +612,7 @@ See [Inferred commitments](/concepts/commitments).
 - `controlUi.dangerouslyAllowHostHeaderOriginFallback`: dangerous mode that enables Host-header origin fallback for deployments that intentionally rely on Host-header origin policy.
 - `remote.transport`: `ssh` (default) or `direct` (ws/wss). For `direct`, `remote.url` must be `wss://` for public hosts; plaintext `ws://` is accepted only for loopback, LAN, link-local, `.local`, `.ts.net`, and Tailscale CGNAT hosts.
 - `remote.remotePort`: gateway port on the remote SSH host. Defaults to `18789`; use this when the local tunnel port differs from the remote gateway port.
+- `remote.sshHostKeyPolicy`: macOS SSH tunnel host-key policy. `strict` is the default and requires an already trusted key. `openssh` is an explicit opt-in to the effective OpenSSH configuration for managed aliases; review matching user and system SSH settings before using it. The macOS app and `configure-remote` reset this policy to `strict` when changing targets unless explicitly opted in again.
 - `gateway.remote.token` / `.password` are remote-client credential fields. They do not configure gateway auth by themselves.
 - `gateway.push.apns.relay.baseUrl`: base HTTPS URL for the external APNs relay used after relay-backed iOS builds publish registrations to the gateway. Public App Store builds use the hosted OpenClaw relay. Custom relay URLs must match a deliberately separate iOS build/deployment path whose relay URL points at that relay.
 - `gateway.push.apns.relay.timeoutMs`: gateway-to-relay send timeout in milliseconds. Defaults to `10000`.
@@ -1162,7 +1163,7 @@ Notes:
 ```json5
 {
   update: {
-    channel: "stable", // stable | beta | dev
+    channel: "stable", // stable | extended-stable | beta | dev
     checkOnStart: true,
 
     auto: {
@@ -1175,7 +1176,9 @@ Notes:
 }
 ```
 
-- `channel`: release channel for npm/git installs - `"stable"`, `"beta"`, or `"dev"`.
+- `channel`: release channel - `"stable"`, `"extended-stable"`, `"beta"`, or
+  `"dev"`. Extended-stable is a package-only, foreground/on-demand channel; it
+  is skipped by startup checks and background auto-update.
 - `checkOnStart`: check for npm updates when the gateway starts (default: `true`).
 - `auto.enabled`: enable background auto-update for package installs (default: `false`).
 - `auto.stableDelayHours`: minimum delay in hours before stable-channel auto-apply (default: `6`; max: `168`).
