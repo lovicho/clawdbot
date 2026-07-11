@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
-import { escapeRegExp } from "openclaw/plugin-sdk/text-utility-runtime";
+import { escapeRegExp, truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { readRequestBodyWithLimit } from "openclaw/plugin-sdk/webhook-ingress";
 import { closeQaHttpServer } from "../../bus-server.js";
 import { QA_LAB_WEB_SEARCH_DENIED_INPUT_QUERY } from "../../qa-web-search-provider.js";
@@ -61,7 +61,7 @@ type StreamEvent =
  * - Everything else (including empty strings) → `"unknown"`
  *
  * The `/v1/messages` route always feeds `body.model` straight through,
- * so an Anthropic request with an `openai/gpt-5.5` model string is still
+ * so an Anthropic request with an `openai/gpt-5.6-luna` model string is still
  * classified as `"openai"`. That matches the parity program's convention
  * where the provider label is the source of truth, not the HTTP route.
  */
@@ -86,7 +86,7 @@ export function resolveProviderVariant(model: string | undefined): MockOpenAiPro
     return "anthropic";
   }
   // Fall back to model-name prefix matching for bare model strings like
-  // `gpt-5.5` or `claude-opus-4-8`.
+  // `gpt-5.6-luna` or `claude-opus-4-8`.
   if (/^(?:gpt-|o1-|openai-)/.test(trimmed)) {
     return "openai";
   }
@@ -1710,7 +1710,7 @@ function buildAssistantText(
     ].join("\n");
   }
   if (toolOutput) {
-    const snippet = toolOutput.replace(/\s+/g, " ").trim().slice(0, 220);
+    const snippet = truncateUtf16Safe(toolOutput.replace(/\s+/g, " ").trim(), 220);
     return `Protocol note: I reviewed the requested material. Evidence snippet: ${snippet || "no content"}`;
   }
   if (finishExactlyDirective) {
@@ -3237,7 +3237,7 @@ async function buildResponsesPayload(
 // ---------------------------------------------------------------------------
 //
 // The QA parity gate needs two comparable scenario runs: one against the
-// "candidate" (openai/gpt-5.5) and one against the "baseline"
+// "candidate" (openai/gpt-5.6-luna) and one against the "baseline"
 // (anthropic/claude-opus-4-8). The OpenAI mock above already dispatches all
 // the scenario prompt branches we care about. Rather than duplicating that
 // machinery, the /v1/messages route below translates Anthropic request
@@ -3756,8 +3756,8 @@ export async function startQaMockOpenAiServer(params?: {
       if (req.method === "GET" && url.pathname === "/v1/models") {
         writeJson(res, 200, {
           data: [
-            { id: "gpt-5.5", object: "model" },
-            { id: "gpt-5.5-alt", object: "model" },
+            { id: "gpt-5.6-luna", object: "model" },
+            { id: "gpt-5.6-luna-alt", object: "model" },
             { id: "gpt-image-1", object: "model" },
             { id: "gpt-4o-transcribe", object: "model" },
             { id: "text-embedding-3-small", object: "model" },
