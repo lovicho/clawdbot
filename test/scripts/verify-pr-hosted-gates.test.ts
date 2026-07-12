@@ -1,3 +1,4 @@
+import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it } from "vitest";
 import {
   collectHostedGateEvidence as collectHostedGateEvidenceRaw,
@@ -10,6 +11,7 @@ import {
 } from "../../scripts/verify-pr-hosted-gates.mjs";
 
 const sha = "773ffd87a1e1e34451ad6e38fda37380c2569a50";
+const previousSha = "8d86c44c6144f8f726a460914cddb8c9c201f119";
 const pr = 100606;
 const nowMs = Date.parse("2026-06-17T10:55:00Z");
 const BUILD_ARTIFACTS_WORKFLOW = "Blacksmith Build Artifacts Testbox";
@@ -105,7 +107,7 @@ describe("verify-pr-hosted-gates", () => {
       successfulRun(name, index + 1, `2026-06-17T10:4${index}:00Z`),
     );
     workflowRuns[2] = {
-      ...workflowRuns[2],
+      ...expectDefined(workflowRuns[2], "Blacksmith ARM Testbox workflow run"),
       conclusion: "failure",
       updated_at: "2026-06-17T10:50:00Z",
     };
@@ -128,7 +130,6 @@ describe("verify-pr-hosted-gates", () => {
   });
 
   it("accepts 13-hour green evidence from the recorded pre-rebase head", () => {
-    const previousSha = "8d86c44c6144f8f726a460914cddb8c9c201f119";
     const evidence = collectHostedGateEvidence({
       sha,
       recentSha: previousSha,
@@ -153,7 +154,6 @@ describe("verify-pr-hosted-gates", () => {
   });
 
   it("accepts recent green evidence from an earlier head of the same PR", () => {
-    const previousSha = "8d86c44c6144f8f726a460914cddb8c9c201f119";
     const evidence = collectHostedGateEvidence({
       sha,
       workflowRuns: [
@@ -177,7 +177,6 @@ describe("verify-pr-hosted-gates", () => {
   });
 
   it("requires recent evidence for scheduled gates observed on the target head", () => {
-    const previousSha = "8d86c44c6144f8f726a460914cddb8c9c201f119";
     const targetArmRun = {
       ...successfulRun("Blacksmith ARM Testbox", 3, "2026-06-17T10:54:00Z"),
       status: "queued",
@@ -220,7 +219,6 @@ describe("verify-pr-hosted-gates", () => {
   it.each(["failure", "cancelled", "skipped"])(
     "does not reuse older green evidence after a current-head %s run",
     (conclusion) => {
-      const previousSha = "8d86c44c6144f8f726a460914cddb8c9c201f119";
       expect(() =>
         collectHostedGateEvidence({
           sha,
@@ -241,7 +239,6 @@ describe("verify-pr-hosted-gates", () => {
   );
 
   it("does not reuse green evidence from another PR", () => {
-    const previousSha = "8d86c44c6144f8f726a460914cddb8c9c201f119";
     expect(() =>
       collectHostedGateEvidence({
         sha,
@@ -262,7 +259,6 @@ describe("verify-pr-hosted-gates", () => {
   });
 
   it("requires the complete recent gate cohort from the recorded head", () => {
-    const previousSha = "8d86c44c6144f8f726a460914cddb8c9c201f119";
     expect(() =>
       collectHostedGateEvidence({
         sha,
@@ -288,7 +284,6 @@ describe("verify-pr-hosted-gates", () => {
   });
 
   it("does not drop an applicable scheduled gate when its success is stale", () => {
-    const previousSha = "8d86c44c6144f8f726a460914cddb8c9c201f119";
     expect(() =>
       collectHostedGateEvidence({
         sha,
@@ -313,7 +308,6 @@ describe("verify-pr-hosted-gates", () => {
   });
 
   it("does not reuse pre-rebase green evidence after a failed current-head manual gate", () => {
-    const previousSha = "8d86c44c6144f8f726a460914cddb8c9c201f119";
     expect(() =>
       collectHostedGateEvidence({
         sha,
@@ -340,7 +334,6 @@ describe("verify-pr-hosted-gates", () => {
   });
 
   it("rejects stale or unrecorded fallback heads", () => {
-    const previousSha = "8d86c44c6144f8f726a460914cddb8c9c201f119";
     const unrelatedSha = "ec159b0222cf4fa21b318317a7c5a29d52c846d2";
     const currentPending = {
       ...successfulRun("CI", 2, "2026-06-17T10:54:00Z"),
@@ -398,7 +391,6 @@ describe("verify-pr-hosted-gates", () => {
   });
 
   it("does not let a late failure from an obsolete head override a green target head", () => {
-    const previousSha = "8d86c44c6144f8f726a460914cddb8c9c201f119";
     expect(
       collectHostedGateEvidence({
         sha,
@@ -728,7 +720,6 @@ describe("verify-pr-hosted-gates", () => {
   });
 
   it("queries the target and recorded pre-rebase SHAs", () => {
-    const previousSha = "8d86c44c6144f8f726a460914cddb8c9c201f119";
     expect(
       workflowRunQueryPaths("openclaw/openclaw", {
         sha,

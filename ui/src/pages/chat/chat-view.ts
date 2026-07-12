@@ -3,7 +3,10 @@ import { html, nothing, type TemplateResult } from "lit";
 import { ref } from "lit/directives/ref.js";
 import { styleMap } from "lit/directives/style-map.js";
 import type { TaskSuggestion } from "../../../../packages/gateway-protocol/src/index.js";
-import type { ControlUiSessionPullRequest } from "../../../../src/gateway/control-ui-contract.js";
+import type {
+  ControlUiSessionBranch,
+  ControlUiSessionPullRequest,
+} from "../../../../src/gateway/control-ui-contract.js";
 import type { SessionsListResult } from "../../api/types.ts";
 import type { ChatSendShortcut } from "../../app/settings.ts";
 import { icons } from "../../components/icons.ts";
@@ -25,6 +28,7 @@ import {
 } from "./components/chat-background-tasks.ts";
 import {
   handleChatAttachmentDrop,
+  isChatRunWorking,
   renderChatComposer,
   resetChatComposerState,
 } from "./components/chat-composer.ts";
@@ -35,6 +39,7 @@ import {
   renderSessionWorkspaceToggle,
   type SessionWorkspaceProps,
 } from "./components/chat-session-workspace.ts";
+import { isSideChatPanelVisible, renderSideChatPanel } from "./components/chat-side-chat.ts";
 import "./components/chat-sidebar.ts";
 import type {
   DetailFullMessageResult,
@@ -58,6 +63,10 @@ import type { ChatRunUiStatus } from "./run-lifecycle.ts";
 import type { CompactionStatus, FallbackStatus } from "./tool-stream.ts";
 import "../../components/resizable-divider.ts";
 
+function isFileDrag(dataTransfer: DataTransfer | null): boolean {
+  return Array.from(dataTransfer?.types ?? []).includes("Files");
+}
+
 export type ChatProps = {
   paneId: string;
   sessionKey: string;
@@ -72,8 +81,14 @@ export type ChatProps = {
   compactionStatus?: CompactionStatus | null;
   fallbackStatus?: FallbackStatus | null;
   messages: unknown[];
-  sideResult?: ChatSideResult | null;
-  sideResultPending?: ChatSideResultPending | null;
+  historyPagination?: {
+    loading: boolean;
+    manualFallback: boolean;
+    onLoadOlder: () => void;
+  };
+  sideChatTurns?: ChatSideResult[];
+  sideChatPending?: ChatSideResultPending | null;
+  sideChatHidden?: boolean;
   toolMessages: unknown[];
   streamSegments: ChatStreamSegment[];
   stream: string | null;
@@ -92,7 +107,7 @@ export type ChatProps = {
   error: string | null;
   sessions: SessionsListResult | null;
   /** Host context resolving global-alias session keys (scope=global fleets). */
-  sessionHost?: Pick<UiSessionDefaultsHost, "agentsList" | "hello"> | null;
+  sessionHost?: UiSessionDefaultsHost | null;
   providerUsage?: ProviderUsageDisplayProps;
   focusMode?: boolean;
   onLoadSidebarFullMessage?: (
@@ -117,10 +132,11 @@ export type ChatProps = {
   assistantAttachmentAuthToken?: string | null;
   autoExpandToolCalls?: boolean;
   attachments?: ChatAttachment[];
+  getAttachments?: () => ChatAttachment[];
   onAttachmentsChange?: (attachments: ChatAttachment[]) => void;
   onAssistantAttachmentLoaded?: () => void;
   showNewMessages?: boolean;
-  onScrollToBottom?: () => void;
+  onScrollToBottom?: (options?: { smooth?: boolean }) => void;
   onRefresh: () => void;
   onToggleFocusMode?: () => void;
   getDraft?: () => string;
@@ -139,9 +155,15 @@ export type ChatProps = {
   onQueueRetry?: (id: string) => void;
   onQueueSteer?: (id: string) => void;
   onGoalCommand?: (command: string) => void;
-  /** Sends a detached /btw side question (chat selection popup). */
-  onSideQuestion?: (command: string) => void;
-  onDismissSideResult?: () => void;
+  /** Sends a detached /btw side question (selection popup or side-chat
+   * follow-up). `displayQuestion` overrides the pending-turn display when the
+   * command embeds carried follow-up context; `onSendRejected` lets the panel
+   * restore its typed follow-up when the detached send is not accepted. */
+  onSideQuestion?: (command: string, displayQuestion?: string, onSendRejected?: () => void) => void;
+  /** Hides the side-chat panel; the conversation (and a pending run) survives. */
+  onSideChatClose?: () => void;
+  /** Discards the side-chat conversation and retires any pending run. */
+  onSideChatClear?: () => void;
   onNewSession: () => void;
   onClearHistory?: () => void;
   agentsList: {
@@ -179,6 +201,7 @@ export type ChatProps = {
   onAcceptTaskSuggestion?: (suggestion: TaskSuggestion) => void;
   onDismissTaskSuggestion?: (suggestion: TaskSuggestion) => void;
   pullRequests?: ControlUiSessionPullRequest[];
+  pullRequestsBranch?: ControlUiSessionBranch;
   pullRequestsRateLimited?: boolean;
   pullRequestsExpanded?: boolean;
   onExpandPullRequests?: () => void;
@@ -199,13 +222,47 @@ export function renderChat(props: ChatProps) {
     props.sessionWorkspace &&
     (props.sessionWorkspace.dock === "bottom" || props.sessionWorkspace.narrowLayout),
   );
+  const tasksOpen = props.backgroundTasks?.collapsed === false;
+  const tasksDockBottom = tasksOpen && props.backgroundTasks?.narrowLayout === true;
   const canCompose = props.canSend;
+  const sideChatProps = {
+    turns: props.sideChatTurns ?? [],
+    pending: props.sideChatPending ?? null,
+    hidden: props.sideChatHidden === true,
+  };
+  const sideChatVisible = isSideChatPanelVisible(sideChatProps);
   let chatSection: HTMLElement | null = null;
+  // Nested dragenter/dragleave events must stay balanced so crossing transcript
+  // children does not flicker the pane-level file drop affordance.
+  let attachmentDragDepth = 0;
+  const setAttachmentDropActive = (event: DragEvent, active: boolean) => {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    if (active) {
+      if (!canCompose || !isFileDrag(event.dataTransfer)) {
+        return;
+      }
+      attachmentDragDepth += 1;
+    } else {
+      attachmentDragDepth = Math.max(0, attachmentDragDepth - 1);
+    }
+    target.toggleAttribute("data-attachment-drop-active", attachmentDragDepth > 0);
+  };
+  const clearAttachmentDropActive = (event: DragEvent) => {
+    attachmentDragDepth = 0;
+    const target = event.currentTarget;
+    if (target instanceof HTMLElement) {
+      target.removeAttribute("data-attachment-drop-active");
+    }
+  };
 
   const thread = renderChatThread({
     paneId: props.paneId,
     sessionKey: props.sessionKey,
     loading: props.loading,
+    historyPagination: props.historyPagination,
     messages: props.messages,
     toolMessages: props.toolMessages,
     streamSegments: props.streamSegments,
@@ -215,6 +272,7 @@ export function renderChat(props: ChatProps) {
     showThinking: props.showThinking,
     showToolCalls: props.showToolCalls,
     runActive: Boolean(props.canAbort),
+    runWorking: isChatRunWorking(props),
     sessions: props.sessions,
     sessionHost: props.sessionHost,
     assistantName: props.assistantName,
@@ -245,6 +303,7 @@ export function renderChat(props: ChatProps) {
     // Archived/non-composable sessions must not offer selection actions:
     // withholding the callback keeps the popup from rendering at all.
     onSideQuestion: props.canSend ? props.onSideQuestion : undefined,
+    onOpenSession: props.onSessionSelect,
     onFocusComposer: () =>
       chatSection
         ?.querySelector<HTMLTextAreaElement>(".agent-chat__composer-combobox > textarea")
@@ -265,8 +324,6 @@ export function renderChat(props: ChatProps) {
     fallbackStatus: props.fallbackStatus,
     messages: props.messages,
     stream: props.stream,
-    sideResult: props.sideResult,
-    sideResultPending: props.sideResultPending,
     queue: props.queue,
     draft: props.draft,
     sessions: props.sessions,
@@ -274,7 +331,7 @@ export function renderChat(props: ChatProps) {
     assistantName: props.assistantName,
     sendShortcut: props.sendShortcut,
     attachments: props.attachments,
-    showNewMessages: props.showNewMessages,
+    getAttachments: props.getAttachments,
     replyTarget: props.replyTarget,
     realtimeTalkActive: props.realtimeTalkActive,
     realtimeTalkStatus: props.realtimeTalkStatus,
@@ -296,12 +353,25 @@ export function renderChat(props: ChatProps) {
     onQueueRetry: props.onQueueRetry,
     onQueueSteer: props.onQueueSteer,
     onGoalCommand: props.onGoalCommand,
-    onDismissSideResult: props.onDismissSideResult,
     onNewSession: props.onNewSession,
     onClearReply: props.onClearReply,
-    onScrollToBottom: props.onScrollToBottom,
     onAttachmentsChange: props.onAttachmentsChange,
   });
+  const scrollToBottomButton =
+    props.showNewMessages && props.onScrollToBottom
+      ? html`
+          <div class="chat-scroll-to-bottom-wrap">
+            <button
+              class="chat-scroll-to-bottom"
+              type="button"
+              @click=${() => props.onScrollToBottom?.({ smooth: true })}
+              aria-label=${t("chat.actions.scrollToLatest")}
+            >
+              ${icons.arrowDown}
+            </button>
+          </div>
+        `
+      : nothing;
 
   return html`
     <section
@@ -319,24 +389,28 @@ export function renderChat(props: ChatProps) {
       )}
       @drop=${(event: DragEvent) => {
         event.preventDefault();
+        clearAttachmentDropActive(event);
         if (canCompose) {
           handleChatAttachmentDrop(event, props);
         }
       }}
-      @dragover=${(event: DragEvent) => event.preventDefault()}
+      @dragenter=${(event: DragEvent) => setAttachmentDropActive(event, true)}
+      @dragleave=${(event: DragEvent) => setAttachmentDropActive(event, false)}
+      @dragover=${(event: DragEvent) => {
+        event.preventDefault();
+        if (canCompose && event.dataTransfer && isFileDrag(event.dataTransfer)) {
+          event.dataTransfer.dropEffect = "copy";
+        }
+      }}
       @keydown=${(event: KeyboardEvent) => {
         if (event.key === "Escape" && props.replyTarget && !event.defaultPrevented) {
           event.preventDefault();
           props.onClearReply?.();
           return;
         }
-        if (
-          event.key === "Escape" &&
-          (props.sideResult || props.sideResultPending) &&
-          !isChatThreadSearchOpen(props.paneId)
-        ) {
+        if (event.key === "Escape" && sideChatVisible && !isChatThreadSearchOpen(props.paneId)) {
           event.preventDefault();
-          props.onDismissSideResult?.();
+          props.onSideChatClose?.();
           return;
         }
         if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key === "f") {
@@ -352,12 +426,12 @@ export function renderChat(props: ChatProps) {
               <span class="callout__content">${props.error}</span>
               ${props.onDismissError
                 ? html`
-                    <openclaw-tooltip content="Dismiss error">
+                    <openclaw-tooltip .content=${t("chat.actions.dismissError")}>
                       <button
                         class="callout__dismiss"
                         type="button"
                         @click=${props.onDismissError}
-                        aria-label="Dismiss error"
+                        aria-label=${t("chat.actions.dismissError")}
                       >
                         ${icons.x}
                       </button>
@@ -369,12 +443,12 @@ export function renderChat(props: ChatProps) {
         : nothing}
       ${props.focusMode && props.onToggleFocusMode
         ? html`
-            <openclaw-tooltip content="Exit focus mode">
+            <openclaw-tooltip .content=${t("chat.actions.exitFocusMode")}>
               <button
                 class="chat-focus-exit"
                 type="button"
                 @click=${props.onToggleFocusMode}
-                aria-label="Exit focus mode"
+                aria-label=${t("chat.actions.exitFocusMode")}
               >
                 ${icons.x}
               </button>
@@ -392,14 +466,13 @@ export function renderChat(props: ChatProps) {
         },
         requestUpdate,
       )}
-
       <div
         class="chat-workbench ${props.sessionWorkspace?.collapsed
           ? "chat-workbench--workspace-collapsed"
-          : ""} ${workspaceDockBottom ? "chat-workbench--dock-bottom" : ""} ${props.backgroundTasks
-          ?.collapsed === false
+          : ""} ${workspaceDockBottom ? "chat-workbench--dock-bottom" : ""} ${tasksOpen &&
+        !tasksDockBottom
           ? "chat-workbench--tasks-open"
-          : ""}"
+          : ""} ${tasksDockBottom ? "chat-workbench--tasks-dock-bottom" : ""}"
       >
         ${renderSessionWorkspaceRail(props.sessionWorkspace)}
         ${renderBackgroundTasksRail(props.backgroundTasks)}
@@ -481,12 +554,23 @@ export function renderChat(props: ChatProps) {
               })}
               ${renderChatPullRequests({
                 pullRequests: props.pullRequests ?? [],
+                branch: props.pullRequestsBranch,
                 rateLimited: props.pullRequestsRateLimited === true,
                 expanded: props.pullRequestsExpanded === true,
                 onExpand: () => props.onExpandPullRequests?.(),
                 onDismiss: (pullRequest) => props.onDismissPullRequest?.(pullRequest),
               })}
-              ${chatColumnFooter}
+              ${scrollToBottomButton} ${chatColumnFooter}
+              ${renderSideChatPanel({
+                ...sideChatProps,
+                // Detached slash sends are refused while disconnected (see
+                // canSubmitDraft); hide the input instead of eating drafts.
+                canFollowUp:
+                  canCompose && props.connected && typeof props.onSideQuestion === "function",
+                onFollowUp: props.onSideQuestion,
+                onClose: props.onSideChatClose,
+                onClear: props.onSideChatClear,
+              })}
             </div>
 
             ${sidebarOpen

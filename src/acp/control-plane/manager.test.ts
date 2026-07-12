@@ -1,6 +1,7 @@
 /** Tests ACP session manager resolution, turn execution, state transitions, and cleanup. */
 import { setTimeout as scheduleNativeTimeout } from "node:timers";
 import { setTimeout as sleep } from "node:timers/promises";
+import { expectDefined } from "@openclaw/normalization-core";
 import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coercion";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -137,11 +138,28 @@ describe("AcpSessionManager", () => {
         mode: "prompt",
         requestId: "system-state-turn",
       });
+      runtimeState.runTurn.mockImplementationOnce(async function* () {
+        yield { type: "done" as const, status: "cancelled" as const };
+      });
+      await manager.runTurn({
+        provenance: "system",
+        cfg: baseCfg,
+        sessionKey: childSessionKey,
+        text: "cancelled turn",
+        mode: "prompt",
+        requestId: "cancelled-state-turn",
+      });
 
       expect(listSessionStateEventsSince(childSessionKey, "main", 0, 200).events).toMatchObject([
         { kind: "human_direct_message", runId: "human-state-turn" },
         { kind: "run_completed", runId: "human-state-turn" },
         { kind: "run_completed", runId: "system-state-turn" },
+        {
+          kind: "run_failed",
+          runId: "cancelled-state-turn",
+          summary: "child run cancelled",
+          payload: { outcome: "cancelled" },
+        },
       ]);
       closeOpenClawStateDatabaseForTest();
     });
@@ -1328,7 +1346,10 @@ describe("AcpSessionManager", () => {
       sessionKey,
     });
     expect(runtimeState.prepareFreshSession.mock.invocationCallOrder[0]).toBeLessThan(
-      runtimeState.ensureSession.mock.invocationCallOrder[0],
+      expectDefined(
+        runtimeState.ensureSession.mock.invocationCallOrder[0],
+        "runtimeState.ensureSession.mock.invocationCallOrder[0] test invariant",
+      ),
     );
   });
 

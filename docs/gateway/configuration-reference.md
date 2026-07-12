@@ -1203,22 +1203,43 @@ Notes:
 {
   audit: {
     enabled: true,
+    messages: "off", // off | direct | all
   },
 }
 ```
 
 The Gateway records **metadata-only** audit events for agent runs and tool
-actions into the shared state database: identity, timing, tool names, and
-terminal outcomes — never prompts, messages, tool arguments, results, or raw
-error text. Records expire after 30 days and the ledger is capped at 100,000
-rows. Query them with [`openclaw audit`](/cli/audit) or the
-[`audit.list`](/gateway/protocol#audit-ledger-rpc) Gateway RPC.
+actions into the shared state database. Message lifecycle metadata is a
+separate opt-in. The ledger stores identity, timing, tool names, and normalized
+outcomes, but never prompts, message bodies, tool arguments, results, or raw
+error text. Message rows do not store raw platform account, conversation,
+message, and target ids. Run/tool session keys remain available for correlation
+and can themselves contain platform account or peer ids. Records
+expire after 30 days and the ledger is capped at 100,000 rows. Query them with
+[`openclaw audit`](/cli/audit) or the
+[`audit.activity.list`](/gateway/protocol#audit-ledger-rpc) Gateway RPC. See
+[Audit history](/gateway/audit) for the full data model, privacy semantics,
+and coverage limits.
 
 - `enabled`: record new audit events (default: `true`). The ledger is on by
   default because an audit trail enabled only after an incident cannot explain
-  the incident. Setting `false` stops new writes immediately; existing records
-  stay readable until they expire. Turning it back on resumes recording from
-  that point — the gap is not backfilled.
+  the incident. Setting `false` stops new event inserts after the Gateway restarts;
+  existing records stay readable until they expire. Turning it back on resumes
+  recording from that point — the gap is not backfilled.
+- `messages`: message metadata scope (default: `"off"`). `"direct"` records
+  known direct conversations only. `"all"` also records group, channel, and
+  unknown conversation kinds. Both modes remain content-free and replace raw
+  identifiers with installation-local keyed pseudonyms where correlation is
+  available. These are correlation aids rather than anonymization; the state
+  database stores the derivation key, but RPC and CLI exports do not.
+
+The running Gateway captures `audit.enabled` and `audit.messages` at startup;
+restart it after changing either setting. Message coverage currently includes
+accepted inbound messages that reach core dispatch and one terminal row per
+original logical outbound reply payload that reaches shared durable delivery.
+Plugin-local and direct-send paths that bypass those shared boundaries are not
+yet covered. The bounded background
+writer is best-effort, not a lossless compliance archive.
 
 ---
 
@@ -1483,7 +1504,7 @@ Current builds no longer include the TCP bridge. Nodes connect over the Gateway 
 }
 ```
 
-- `sessionRetention`: how long to keep completed isolated cron run sessions before pruning from `sessions.json`. Also controls cleanup of archived deleted cron transcripts. Default: `24h`; set `false` to disable.
+- `sessionRetention`: how long to keep completed isolated cron run sessions before pruning SQLite session rows. Also controls cleanup of archived deleted cron transcripts. Default: `24h`; set `false` to disable.
 - `runLog.maxBytes`: accepted for compatibility with older file-backed cron run logs. Default: `2_000_000` bytes.
 - `runLog.keepLines`: newest SQLite run-history rows retained per job. Default: `2000`.
 - `webhookToken`: bearer token used for cron webhook POST delivery (`delivery.mode = "webhook"`), if omitted no auth header is sent.
