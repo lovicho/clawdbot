@@ -7,11 +7,13 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanupTempDirs, makeTempDir } from "../../test/helpers/temp-dir.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import { createBundleMcpJsonSchemaValidator } from "./agent-bundle-mcp-runtime.js";
-import { cleanupBundleMcpHarness } from "./agent-bundle-mcp-test-harness.js";
 import {
   completeDeferredSessionMcpRuntimeRetirement,
+  createBundleMcpJsonSchemaValidator,
   createSessionMcpRuntime,
+} from "./agent-bundle-mcp-runtime.js";
+import { cleanupBundleMcpHarness } from "./agent-bundle-mcp-test-harness.js";
+import {
   getOrCreateSessionMcpRuntime,
   materializeBundleMcpToolsForRun,
   retireSessionMcpRuntime,
@@ -1700,8 +1702,10 @@ process.on("SIGINT", shutdown);`,
 
   it("reuses repeated materialization and recreates after explicit disposal", async () => {
     const created: SessionMcpRuntime[] = [];
+    const createdManifestRegistries: unknown[] = [];
     const disposed: string[] = [];
     const createRuntime: RuntimeFactory = (params) => {
+      createdManifestRegistries.push(params.manifestRegistry);
       const runtime = makeRuntime([{ toolName: "bundle_probe", description: "Bundle MCP probe" }]);
       created.push(runtime);
       return {
@@ -1716,16 +1720,19 @@ process.on("SIGINT", shutdown);`,
       };
     };
     const manager = testing.createSessionMcpRuntimeManager({ createRuntime });
+    const manifestRegistry = { plugins: [] };
 
     const runtimeA = await manager.getOrCreate({
       sessionId: "session-a",
       sessionKey: "agent:test:session-a",
       workspaceDir: "/workspace",
+      manifestRegistry,
     });
     const runtimeB = await manager.getOrCreate({
       sessionId: "session-a",
       sessionKey: "agent:test:session-a",
       workspaceDir: "/workspace",
+      manifestRegistry,
     });
 
     const materializedA = await materializeBundleMcpToolsForRun({ runtime: runtimeA });
@@ -1738,6 +1745,7 @@ process.on("SIGINT", shutdown);`,
     expect(materializedA.tools.map((tool) => tool.name)).toEqual(["bundleProbe__bundle_probe"]);
     expect(materializedB.tools.map((tool) => tool.name)).toEqual(["bundleProbe__bundle_probe"]);
     expect(created).toHaveLength(1);
+    expect(createdManifestRegistries).toEqual([manifestRegistry]);
     expect(manager.listSessionIds()).toEqual(["session-a"]);
 
     await manager.disposeSession("session-a");
@@ -1747,11 +1755,13 @@ process.on("SIGINT", shutdown);`,
       sessionId: "session-a",
       sessionKey: "agent:test:session-a",
       workspaceDir: "/workspace",
+      manifestRegistry,
     });
     await materializeBundleMcpToolsForRun({ runtime: runtimeC });
 
     expect(runtimeC).not.toBe(runtimeA);
     expect(created).toHaveLength(2);
+    expect(createdManifestRegistries).toEqual([manifestRegistry, manifestRegistry]);
 
     const materializedC = await materializeBundleMcpToolsForRun({
       runtime: runtimeC,
