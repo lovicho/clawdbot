@@ -2,6 +2,7 @@ import type { ChannelLegacyStateMigrationPlan } from "../channels/plugins/types.
 import type { SessionScope } from "../config/sessions/types.js";
 import type { PluginDoctorStateMigration } from "../plugins/doctor-contract-registry.js";
 import type { LegacyChannelPairingStateDetection } from "./state-migrations.channel-pairing.js";
+import type { LegacyWorkspaceStateDetection } from "./state-migrations.workspace-setup.types.js";
 
 export type LegacyRescuePendingDetection = {
   sourcePaths: string[];
@@ -104,19 +105,30 @@ export type LegacyStateDetection = {
     sourceDir: string;
     hasLegacy: boolean;
   };
-  rescuePending: LegacyRescuePendingDetection;
-  channelPairing: LegacyChannelPairingStateDetection;
-  execApprovals: {
+  apns: {
     sourcePath: string;
-    targetPath: string;
     hasLegacy: boolean;
   };
+  workspace: LegacyWorkspaceStateDetection;
+  webPush: {
+    subscriptionsPath: string;
+    vapidKeysPath: string;
+    hasLegacy: boolean;
+  };
+  nodeHost: {
+    sourcePath: string;
+    hasLegacy: boolean;
+  };
+  subagentRegistry: {
+    sourcePath: string;
+    hasLegacy: boolean;
+  };
+  rescuePending: LegacyRescuePendingDetection;
+  channelPairing: LegacyChannelPairingStateDetection;
   warnings: string[];
   notices: string[];
   preview: string[];
 };
-
-export type LegacyExecApprovalsMigrationDetection = LegacyStateDetection["execApprovals"];
 
 export type MigrationLogger = {
   info: (message: string) => void;
