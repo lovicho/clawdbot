@@ -113,9 +113,9 @@ describe("classifyPrForSweep", () => {
       expected: { action: "skip", reason: "refire-budget-exhausted" },
     },
     {
-      name: "skips while mergeability is still computing",
+      name: "re-fires on unknown mergeability (stuck merge-ref IS the pathology)",
       input: { pr: pr({ mergeable: null }), ciRuns: [], botCloseCount: 0, now: NOW },
-      expected: { action: "skip", reason: "mergeability-pending" },
+      expected: { action: "refire", reason: "ci-run-missing" },
     },
   ];
 
@@ -210,6 +210,7 @@ describe("runPrCiSweeper", () => {
       core: core as never,
       dryRun: true,
       appSlug: "openclaw-barnacle",
+      now: NOW,
     });
     expect(results).toEqual([
       { number: 7, sha: "a".repeat(12), action: "refire", reason: "ci-startup-failure" },
@@ -230,6 +231,7 @@ describe("runPrCiSweeper", () => {
       context: context as never,
       core: core as never,
       appSlug: "openclaw-barnacle",
+      now: NOW,
     });
     expect(results).toEqual([
       { number: 9, sha: "c".repeat(12), action: "refire", reason: "ci-run-missing" },

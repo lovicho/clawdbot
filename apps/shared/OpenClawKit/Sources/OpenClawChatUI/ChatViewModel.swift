@@ -90,8 +90,10 @@ public final class OpenClawChatViewModel {
     public internal(set) var questionCards: [OpenClawQuestionCardModel] = []
     var questionRefreshGeneration: UInt64 = 0
     var questionStateRevision: UInt64 = 0
-    var questionEvictionTasks: [String: Task<Void, Never>] = [:]
-    var questionEvictionDeadlines: [String: Date] = [:]
+    var questionExpiryTasks: [String: Task<Void, Never>] = [:]
+    var questionExpiryDeadlines: [String: Date] = [:]
+    var questionRefreshRetryTask: Task<Void, Never>?
+    var questionRefreshRetryDelaysMs: [Int64] = [1000, 2000, 4000]
     var hasActiveSessionRunWithoutChatSnapshot = false
 
     public private(set) var sessionKey: String {
@@ -498,7 +500,8 @@ public final class OpenClawChatViewModel {
         self.outboxRetryTask?.cancel()
         self.outboxChangesTask?.cancel()
         self.activeSessionRunIndicatorTimeoutTask?.cancel()
-        for (_, task) in self.questionEvictionTasks {
+        self.questionRefreshRetryTask?.cancel()
+        for (_, task) in self.questionExpiryTasks {
             task.cancel()
         }
         for (_, task) in self.pendingRunOwnerTasks {
@@ -1163,13 +1166,13 @@ extension OpenClawChatViewModel {
     func performCompact() async {
         guard !self.isCompacting else { return }
         guard !self.isSending, !hasBlockingRunActivity, !self.isAborting else {
-            self.errorText = "Wait for the current response before compacting the session."
+            self.errorText = "Wait for the current response before compacting the thread."
             return
         }
         if let lastCompactAt,
            Date().timeIntervalSince(lastCompactAt) < compactCooldown
         {
-            self.errorText = "Please wait before compacting this session again."
+            self.errorText = "Please wait before compacting this thread again."
             return
         }
 
@@ -1184,7 +1187,7 @@ extension OpenClawChatViewModel {
             try await self.transport.compactSession(sessionKey: self.sessionKey)
         } catch {
             self.isLoading = false
-            self.errorText = "Unable to compact the session. Please try again."
+            self.errorText = "Unable to compact the thread. Please try again."
             let nsError = error as NSError
             chatUILogger.error(
                 "compact failed domain=\(nsError.domain, privacy: .public) code=\(nsError.code, privacy: .public)")

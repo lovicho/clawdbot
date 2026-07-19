@@ -37,14 +37,13 @@ export function classifyPrForSweep({ pr, ciRuns, botCloseCount, now }) {
     return { action: "skip", reason: "recently-updated" };
   }
   // A conflicted PR legitimately has no merge ref; CI cannot attach until the
-  // author resolves, so re-firing would loop forever.
+  // author resolves, so re-firing would loop forever. Null/unknown mergeability
+  // is NOT skipped: live testing showed dropped-CI PRs stay mergeable=null
+  // indefinitely (the stuck merge-ref computation IS the pathology), and
+  // close/reopen is what un-sticks it. A not-yet-computed conflict costs at
+  // most one budgeted re-fire before the recomputed false skips it.
   if (pr.mergeable === false) {
     return { action: "skip", reason: "merge-conflict" };
-  }
-  // Pending computation resolves by the next hourly sweep; do not close/reopen
-  // on an unknown merge state.
-  if (pr.mergeable === null || pr.mergeable === undefined) {
-    return { action: "skip", reason: "mergeability-pending" };
   }
   // Closing a PR silently cancels enabled auto-merge and reopening does not
   // restore it; leave those PRs (e.g. generated locale refreshes) to a human.
@@ -132,13 +131,21 @@ async function reopenWithRetry({ github, core, owner, repo, pullNumber }) {
   return false;
 }
 
-export async function runPrCiSweeper({ github, context, core, dryRun = false, appSlug = "" }) {
+export async function runPrCiSweeper({
+  github,
+  context,
+  core,
+  dryRun = false,
+  appSlug = "",
+  // Injectable clock: fixture-based tests pin a fixed instant so lookback
+  // classification cannot rot as wall-clock time passes the fixture dates.
+  now = Date.now(),
+}) {
   const sweeperLogins = new Set(KNOWN_SWEEPER_LOGINS);
   if (appSlug) {
     sweeperLogins.add(`${appSlug}[bot]`);
   }
   const { owner, repo } = context.repo;
-  const now = Date.now();
   const results = [];
   let refires = 0;
   const openPrs = await github.paginate(github.rest.pulls.list, {
@@ -203,7 +210,7 @@ export async function runPrCiSweeper({ github, context, core, dryRun = false, ap
       fresh.state !== "open" ||
       fresh.head.sha !== pr.head.sha ||
       fresh.auto_merge ||
-      fresh.mergeable !== true
+      fresh.mergeable === false
     ) {
       core.info(`pr-ci-sweeper: #${pr.number} changed during sweep; leaving it alone`);
       continue;

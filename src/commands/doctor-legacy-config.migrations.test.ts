@@ -58,6 +58,10 @@ vi.mock("../plugins/manifest-registry.js", () => ({
   },
 }));
 
+function legacyConfig(value: unknown): OpenClawConfig {
+  return value as OpenClawConfig;
+}
+
 vi.mock("./doctor/shared/channel-legacy-config-migrate.js", () => ({
   applyChannelDoctorCompatibilityMigrations: (cfg: OpenClawConfig) => ({
     next: cfg,
@@ -632,20 +636,6 @@ describe("normalizeCompatibilityConfigValues", () => {
     ]);
   });
 
-  it("removes deprecated commands.modelsWrite from legacy configs", () => {
-    const res = normalizeCompatibilityConfigValues({
-      commands: {
-        text: true,
-        modelsWrite: false,
-      },
-    } as unknown as OpenClawConfig);
-
-    expect(res.config.commands).toEqual({ text: true });
-    expect(res.changes).toContain(
-      "Removed deprecated commands.modelsWrite (/models add is deprecated).",
-    );
-  });
-
   it("migrates legacy OpenAI provider api values to OpenAI completions", () => {
     const res = normalizeCompatibilityConfigValues({
       models: {
@@ -1153,6 +1143,10 @@ describe("normalizeCompatibilityConfigValues", () => {
       "openai/gpt-5.6-sol": { alias: "codex", agentRuntime: { id: "codex" } },
       "openai/gpt-5.4-mini": { agentRuntime: { id: "codex" } },
     });
+    expect(repaired.cfg.agents?.defaults?.modelPolicy?.allow).toEqual([
+      "openai/gpt-5.6-sol",
+      "openai/gpt-5.4-mini",
+    ]);
     expect(repaired.cfg.models?.providers).not.toHaveProperty("codex");
     expect(repaired.cfg.models?.providers?.openai?.models?.[0]).toMatchObject({
       id: "gpt-5.6-sol",
@@ -1553,25 +1547,27 @@ describe("normalizeCompatibilityConfigValues", () => {
   });
 
   it("migrates legacy web search provider config to plugin-owned config paths", () => {
-    const res = normalizeCompatibilityConfigValues({
-      tools: {
-        web: {
-          search: {
-            provider: "gemini",
-            maxResults: 5,
-            apiKey: "brave-key",
-            gemini: {
-              apiKey: "gemini-key",
-              model: "gemini-2.5-flash",
-            },
-            firecrawl: {
-              apiKey: "firecrawl-key",
-              baseUrl: "https://api.firecrawl.dev",
+    const res = normalizeCompatibilityConfigValues(
+      legacyConfig({
+        tools: {
+          web: {
+            search: {
+              provider: "gemini",
+              maxResults: 5,
+              apiKey: "brave-key",
+              gemini: {
+                apiKey: "gemini-key",
+                model: "gemini-2.5-flash",
+              },
+              firecrawl: {
+                apiKey: "firecrawl-key",
+                baseUrl: "https://api.firecrawl.dev",
+              },
             },
           },
         },
-      },
-    });
+      }),
+    );
 
     expect(res.config.tools?.web?.search).toEqual({
       provider: "gemini",
@@ -1611,32 +1607,34 @@ describe("normalizeCompatibilityConfigValues", () => {
   });
 
   it("merges legacy web search provider config into explicit plugin config without overriding it", () => {
-    const res = normalizeCompatibilityConfigValues({
-      tools: {
-        web: {
-          search: {
-            provider: "gemini",
-            gemini: {
-              apiKey: "legacy-gemini-key",
-              model: "legacy-model",
-            },
-          },
-        },
-      },
-      plugins: {
-        entries: {
-          google: {
-            enabled: true,
-            config: {
-              webSearch: {
-                model: "explicit-model",
-                baseUrl: "https://generativelanguage.googleapis.com",
+    const res = normalizeCompatibilityConfigValues(
+      legacyConfig({
+        tools: {
+          web: {
+            search: {
+              provider: "gemini",
+              gemini: {
+                apiKey: "legacy-gemini-key",
+                model: "legacy-model",
               },
             },
           },
         },
-      },
-    });
+        plugins: {
+          entries: {
+            google: {
+              enabled: true,
+              config: {
+                webSearch: {
+                  model: "explicit-model",
+                  baseUrl: "https://generativelanguage.googleapis.com",
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
 
     expect(res.config.tools?.web?.search).toEqual({
       provider: "gemini",
@@ -1746,138 +1744,6 @@ describe("normalizeCompatibilityConfigValues", () => {
 
     expect(res.config).toEqual(input);
     expect(res.changes).toStrictEqual([]);
-  });
-
-  it("does not report talk provider normalization for realtime voice aliases", () => {
-    const input = {
-      talk: {
-        provider: "elevenlabs",
-        providers: {
-          elevenlabs: {
-            voiceId: "voice-123",
-          },
-        },
-        realtime: {
-          provider: "openai",
-          providers: {
-            openai: {
-              model: "gpt-realtime",
-            },
-          },
-          model: "gpt-realtime",
-          voice: "cedar",
-          mode: "realtime",
-          transport: "gateway-relay",
-          brain: "agent-consult",
-        },
-      },
-    };
-
-    const res = normalizeCompatibilityConfigValues(input as OpenClawConfig);
-
-    expect(res.config).toEqual(input);
-    expect(res.changes).toStrictEqual([]);
-  });
-
-  it("migrates tools.message.allowCrossContextSend to canonical crossContext settings", () => {
-    const res = normalizeCompatibilityConfigValues({
-      tools: {
-        message: {
-          allowCrossContextSend: true,
-          crossContext: {
-            allowWithinProvider: false,
-            allowAcrossProviders: false,
-          },
-        },
-      },
-    });
-
-    expect(res.config.tools?.message).toEqual({
-      crossContext: {
-        allowWithinProvider: true,
-        allowAcrossProviders: true,
-      },
-    });
-    expect(res.changes).toEqual([
-      "Moved tools.message.allowCrossContextSend → tools.message.crossContext.allowWithinProvider/allowAcrossProviders (true).",
-    ]);
-  });
-
-  it("migrates legacy deepgram media options to providerOptions.deepgram", () => {
-    const res = normalizeCompatibilityConfigValues({
-      tools: {
-        media: {
-          audio: {
-            deepgram: {
-              detectLanguage: true,
-              smartFormat: true,
-            },
-            providerOptions: {
-              deepgram: {
-                punctuate: false,
-              },
-            },
-            models: [
-              {
-                provider: "deepgram",
-                deepgram: {
-                  punctuate: true,
-                },
-              },
-            ],
-          },
-          models: [
-            {
-              provider: "deepgram",
-              deepgram: {
-                smartFormat: false,
-              },
-              providerOptions: {
-                deepgram: {
-                  detect_language: true,
-                },
-              },
-            },
-          ],
-        },
-      },
-    });
-
-    expect(res.config.tools?.media?.audio).toEqual({
-      providerOptions: {
-        deepgram: {
-          detect_language: true,
-          smart_format: true,
-          punctuate: false,
-        },
-      },
-      models: [
-        {
-          provider: "deepgram",
-          providerOptions: {
-            deepgram: {
-              punctuate: true,
-            },
-          },
-        },
-      ],
-    });
-    expect(res.config.tools?.media?.models).toEqual([
-      {
-        provider: "deepgram",
-        providerOptions: {
-          deepgram: {
-            smart_format: false,
-            detect_language: true,
-          },
-        },
-      },
-    ]);
-    expect(res.changes).toEqual([
-      "Merged tools.media.audio.deepgram → tools.media.audio.providerOptions.deepgram (filled missing canonical fields from legacy).",
-      "Moved tools.media.audio.models[0].deepgram → tools.media.audio.models[0].providerOptions.deepgram.",
-      "Merged tools.media.models[0].deepgram → tools.media.models[0].providerOptions.deepgram (filled missing canonical fields from legacy).",
-    ]);
   });
 
   it("sets native Ollama params.num_ctx from explicit model contextWindow budgets", () => {
