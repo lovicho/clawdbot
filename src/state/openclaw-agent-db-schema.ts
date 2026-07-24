@@ -45,6 +45,7 @@ import { OPENCLAW_SQLITE_BUSY_TIMEOUT_MS } from "./openclaw-state-db.js";
 const OPENCLAW_AGENT_CANONICAL_UNIQUE_INDEXES = [
   {
     name: "idx_agent_conversations_identity",
+    tableName: "conversations",
     definition: `
       ON conversations(
         channel,
@@ -58,6 +59,7 @@ const OPENCLAW_AGENT_CANONICAL_UNIQUE_INDEXES = [
   },
   {
     name: "idx_agent_session_conversations_primary",
+    tableName: "session_conversations",
     definition: `
       ON session_conversations(session_id)
       WHERE role = 'primary'
@@ -65,9 +67,23 @@ const OPENCLAW_AGENT_CANONICAL_UNIQUE_INDEXES = [
   },
   {
     name: "idx_agent_transcript_message_idempotency",
+    tableName: "transcript_event_identities",
     definition: `
       ON transcript_event_identities(session_id, message_idempotency_key)
       WHERE message_idempotency_key IS NOT NULL
+    `,
+  },
+  {
+    name: "idx_agent_transcript_active_event_seq",
+    tableName: "session_transcript_active_events",
+    definition: "ON session_transcript_active_events(session_id, event_seq)",
+  },
+  {
+    name: "idx_agent_transcript_active_messages",
+    tableName: "session_transcript_active_events",
+    definition: `
+      ON session_transcript_active_events(session_id, message_position)
+      WHERE message_position IS NOT NULL
     `,
   },
 ] as const satisfies readonly CanonicalSqliteUniqueIndex[];
@@ -363,8 +379,11 @@ function migratedSessionScope(
 }
 
 function migratedEntryChannel(entry: MigratedSessionEntry): string | null {
-  const deliveryContext = migratedObjectField(entry, "deliveryContext");
-  const origin = migratedObjectField(entry, "origin");
+  const delivery = migratedObjectField(entry, "delivery");
+  const deliveryContext =
+    migratedObjectField(delivery ?? {}, "context") ?? migratedObjectField(entry, "deliveryContext");
+  const origin =
+    migratedObjectField(delivery ?? {}, "origin") ?? migratedObjectField(entry, "origin");
   return (
     migratedText(entry.channel) ??
     migratedText(deliveryContext?.channel) ??
@@ -374,8 +393,11 @@ function migratedEntryChannel(entry: MigratedSessionEntry): string | null {
 }
 
 function migratedEntryAccountId(entry: MigratedSessionEntry): string | null {
-  const deliveryContext = migratedObjectField(entry, "deliveryContext");
-  const origin = migratedObjectField(entry, "origin");
+  const delivery = migratedObjectField(entry, "delivery");
+  const deliveryContext =
+    migratedObjectField(delivery ?? {}, "context") ?? migratedObjectField(entry, "deliveryContext");
+  const origin =
+    migratedObjectField(delivery ?? {}, "origin") ?? migratedObjectField(entry, "origin");
   return (
     migratedText(deliveryContext?.accountId) ??
     migratedText(entry.lastAccountId) ??
