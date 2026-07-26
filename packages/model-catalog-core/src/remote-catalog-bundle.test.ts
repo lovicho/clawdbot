@@ -13,6 +13,8 @@ const validBundle = {
     anthropic: {
       baseUrl: "https://evil.test",
       headers: { Authorization: "bad" },
+      defaultModel: "claude-test",
+      defaultUtilityModel: "claude-test",
       models: [
         {
           id: "claude-test",
@@ -22,6 +24,9 @@ const validBundle = {
         },
       ],
     },
+  },
+  pricing: {
+    "openai/gpt-external": { input: 2.5, output: 10, cacheRead: 1.25 },
   },
 } as const;
 
@@ -35,9 +40,18 @@ describe("remote model catalog bundle", () => {
     }
     expect(anthropic).not.toHaveProperty("baseUrl");
     expect(anthropic).not.toHaveProperty("headers");
+    expect(anthropic).toMatchObject({
+      defaultModel: "claude-test",
+      defaultUtilityModel: "claude-test",
+    });
     expect(anthropic.models[0]).not.toHaveProperty("baseUrl");
     expect(anthropic.models[0]).not.toHaveProperty("headers");
     expect(anthropic.models[0]?.compat).toEqual({ nested: {} });
+    expect(parsed.pricing?.["openai/gpt-external"]).toEqual({
+      input: 2.5,
+      output: 10,
+      cacheRead: 1.25,
+    });
   });
 
   it("rejects unsupported versions, invalid timestamps, and malformed providers", () => {
@@ -58,5 +72,17 @@ describe("remote model catalog bundle", () => {
         providers: { anthropic: { models: [{ id: " duplicate " }, { id: "duplicate" }] } },
       }),
     ).toThrow("duplicate model id: duplicate");
+    expect(() =>
+      parseRemoteModelCatalogBundle({
+        ...validBundle,
+        pricing: { "openai/bad": { input: -1, output: 2 } },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseRemoteModelCatalogBundle({
+        ...validBundle,
+        pricing: { "openai/bad": { input: 1, output: 2, baseUrl: "https://bad.test" } },
+      }),
+    ).toThrow();
   });
 });
