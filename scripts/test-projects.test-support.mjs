@@ -749,6 +749,7 @@ const TOOLING_SOURCE_TEST_TARGETS = new Map([
   [".github/workflows/clawsweeper-dispatch.yml", ["test/scripts/ci-workflow-guards.test.ts"]],
   [".github/workflows/labeler.yml", ["test/scripts/ci-workflow-guards.test.ts"]],
   [".github/workflows/real-behavior-proof.yml", ["test/scripts/ci-workflow-guards.test.ts"]],
+  [".github/workflows/stale.yml", ["test/scripts/ci-workflow-guards.test.ts"]],
   [
     ".github/workflows/security-sensitive-guard.yml",
     ["test/scripts/security-sensitive-guard-workflow.test.ts"],
@@ -1567,6 +1568,10 @@ const TOOLING_SOURCE_TEST_TARGETS = new Map([
   ["scripts/qa-lab-up.ts", ["test/scripts/qa-lab-up.test.ts"]],
   ["scripts/qa-coverage-report.ts", ["test/scripts/qa-report-cli.test.ts"]],
   ["scripts/qa-parity-report.ts", ["test/scripts/qa-report-cli.test.ts"]],
+  [
+    "scripts/validate-qa-runtime-pair-summary.mjs",
+    ["test/scripts/validate-qa-runtime-pair-summary.test.ts"],
+  ],
   ["scripts/qa/render-maturity-docs.ts", ["test/scripts/render-maturity-docs.test.ts"]],
   [
     "scripts/qa/ux-matrix-evidence-producer.ts",

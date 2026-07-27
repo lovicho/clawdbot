@@ -11,9 +11,7 @@ import {
 import { resolveConversationCapabilityProfile } from "../conversation-capability-profile.js";
 import {
   filterLocalModelLeanTools,
-  isLocalModelLeanEnabled,
   resolveLocalModelLeanPreserveToolNames,
-  shouldCatalogToolForLocalModelLean,
 } from "../local-model-lean.js";
 import type { ScheduledToolPolicyContext } from "../scheduled-tool-policy.js";
 import { filterRuntimeCompatibleTools } from "../tool-schema-projection.js";
@@ -23,7 +21,6 @@ import {
   applyToolSearchCatalog,
   clearToolSearchCatalog,
   createToolSearchCatalogRef,
-  estimateToolSchemaDirectoryToolNames,
   resolveToolSearchConfig,
   TOOL_CALL_RAW_TOOL_NAME,
   TOOL_DESCRIBE_RAW_TOOL_NAME,
@@ -81,11 +78,6 @@ export function createAgentHarnessToolSurfaceRuntime(params: {
 }): AgentHarnessToolSurfaceRuntime {
   const forceDirectMessageTool =
     params.forceMessageTool === true || params.sourceReplyDeliveryMode === "message_tool_only";
-  const localModelLeanEnabled = isLocalModelLeanEnabled({
-    config: params.config,
-    agentId: params.agentId,
-    sessionKey: params.sessionKey,
-  });
   const codeModeConfig = resolveCodeModeConfig(params.config, params.agentId);
   const toolSearchRuntimeConfig = resolveAgentToolSearchRuntimeConfig({
     config: params.config,
@@ -163,22 +155,9 @@ export function createAgentHarnessToolSurfaceRuntime(params: {
           executeTool: params.executeTool,
         })
       : [];
-    const directoryRequiredToolNames = forceDirectMessageTool ? ["message"] : [];
-    const directoryHydratedToolNames =
-      toolSearchControlsEnabled && toolSearchConfig.mode === "directory"
-        ? (() => {
-            try {
-              return estimateToolSchemaDirectoryToolNames({
-                tools: effectiveTools,
-                query: params.prompt ?? "",
-                maxTools: 4,
-                requiredToolNames: directoryRequiredToolNames,
-              });
-            } catch {
-              return directoryRequiredToolNames;
-            }
-          })()
-        : [];
+    // When the message tool is the only reply path it must stay directly visible
+    // in every search mode; a hidden delivery tool can leave the run mute.
+    const requiredDirectToolNames = forceDirectMessageTool ? ["message"] : [];
     const compacted = codeModeControlsEnabled
       ? applyCodeModeCatalog({
           tools: [...codeModeTools, ...effectiveTools],
@@ -200,7 +179,7 @@ export function createAgentHarnessToolSurfaceRuntime(params: {
             runId: params.runId,
             catalogRef: toolSearchCatalogRef,
             toolHookContext: options.hookContext,
-            hydrateToolNames: directoryHydratedToolNames,
+            directToolNames: requiredDirectToolNames,
           })
         : applyToolSearchCatalog({
             tools: effectiveTools,
@@ -211,10 +190,7 @@ export function createAgentHarnessToolSurfaceRuntime(params: {
             runId: params.runId,
             catalogRef: toolSearchCatalogRef,
             toolHookContext: options.hookContext,
-            shouldCatalogTool:
-              localModelLeanEnabled && toolSearchConfig.mode === "tools"
-                ? shouldCatalogToolForLocalModelLean
-                : undefined,
+            directToolNames: requiredDirectToolNames,
           });
     const projectedCompactedTools = options.localModelLeanApplied
       ? compacted.tools

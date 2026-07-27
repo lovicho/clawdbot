@@ -1323,6 +1323,7 @@ describe("scripts/test-projects changed-target routing", () => {
       ".github/workflows/clawsweeper-dispatch.yml",
       ".github/workflows/labeler.yml",
       ".github/workflows/real-behavior-proof.yml",
+      ".github/workflows/stale.yml",
     ]) {
       expect(resolveChangedTestTargetPlan([workflowPath])).toEqual({
         mode: "targets",
@@ -4348,6 +4349,12 @@ describe("scripts/test-projects full-suite sharding", () => {
     expect(fullSuiteMatches.get("src/tui/tui-pty-harness.e2e.test.ts")).toEqual([
       "test/vitest/vitest.tui-pty.config.ts",
     ]);
+  });
+
+  it("covers Codex attempt client prewarming in full-suite routing", () => {
+    expect(
+      fullSuiteMatches.get("extensions/codex/src/app-server/run-attempt-client-prewarm.test.ts"),
+    ).toEqual(["test/vitest/vitest.extension-codex-app-server-attempt-light.config.ts"]);
   });
 
   it("uses the global host worker budget for roomy local hosts", () => {
