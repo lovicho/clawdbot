@@ -57,7 +57,6 @@ export {
   requestSessionUsage,
   requestSessionUsageLogs,
   requestSessionUsageTimeSeries,
-  requestSessionsUsage,
 } from "./usage.ts";
 
 type SessionState = {
@@ -99,6 +98,9 @@ export type SessionListOptions = {
 export const DEFAULT_SESSION_LIST_QUERY = {
   limit: 50,
 } as const satisfies SessionListOptions;
+
+const SESSION_EVENT_REFRESH_DEBOUNCE_MS = 200;
+const SESSION_EVENT_REFRESH_MAX_WAIT_MS = 1_000;
 
 type SessionRefreshOptions = SessionListOptions & {
   force?: boolean;
@@ -213,6 +215,10 @@ export type SessionCapability = {
   create: (params?: SessionCreateParams) => Promise<string | null>;
   patch: SessionPatchRoute;
   setModelOverride: (key: string, value: string | null | undefined) => void;
+  /** Applies optimistic row fields to the published snapshot so mid-flight
+   * publishes (e.g. a refresh's loading flip) cannot revert them before the
+   * post-mutation canonical list lands. */
+  patchRowLocal: (key: string, patch: Partial<GatewaySessionRow>) => void;
   /** True while a just-created work session is waiting for its canonical placement row. */
   isPreparedWorkSession: (key: string) => boolean;
   pullRequestSummary: (key: string) => SessionCatalogPullRequestSummary | undefined;
@@ -836,6 +842,8 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
   };
   let inFlight: Promise<void> | null = null;
   let queuedRefresh: SessionRefreshOptions | null = null;
+  let eventRefreshTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
+  let eventRefreshDeadline: number | null = null;
   let canonicalListRevision = 0;
   let disposed = false;
   let connectionEpoch = 0;
@@ -963,6 +971,31 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     publish({ ...state, modelOverrides });
   };
 
+  // Optimistic session-settings patches (thinking level, speed) must live in
+  // the published capability snapshot, not only in consumer copies: every
+  // publish replaces consumer state wholesale, so a copy-only patch reverts on
+  // the next loading flip until the post-patch canonical list arrives. The
+  // revert window loses keyboard commits on the reasoning slider (flaky UI).
+  const patchRowLocal = (key: string, patch: Partial<GatewaySessionRow>) => {
+    const result = state.result;
+    const normalizedKey = key.trim();
+    if (!result || !normalizedKey) {
+      return;
+    }
+    let changed = false;
+    const sessions = result.sessions.map((row) => {
+      if (row.key !== normalizedKey) {
+        return row;
+      }
+      changed = true;
+      return { ...row, ...patch };
+    });
+    if (!changed) {
+      return;
+    }
+    publish({ ...state, result: { ...result, sessions } });
+  };
+
   const rollbackPendingModelPatches = () => {
     const pending = [...pendingModelPatches];
     pendingModelPatches.clear();
@@ -1069,11 +1102,21 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     }
   };
 
+  const clearEventRefreshTimer = () => {
+    if (eventRefreshTimer !== null) {
+      globalThis.clearTimeout(eventRefreshTimer);
+      eventRefreshTimer = null;
+    }
+    eventRefreshDeadline = null;
+  };
+
   const refresh = (options: SessionRefreshOptions = {}) => {
     if (gateway.snapshot.phase !== "connected" || !gateway.snapshot.client || disposed) {
       return Promise.resolve();
     }
     if (inFlight) {
+      // An explicit queued refresh subsumes any older event invalidation.
+      clearEventRefreshTimer();
       queuedRefresh = options;
       return inFlight;
     }
@@ -1083,6 +1126,8 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     if (state.result && !options.force && !hasListOverrides) {
       return Promise.resolve();
     }
+    // An explicit refresh that will issue a request must run now.
+    clearEventRefreshTimer();
     const request = drainRefreshQueue(options).finally(() => {
       if (inFlight === request) {
         inFlight = null;
@@ -1091,6 +1136,43 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     inFlight = request;
     return request;
   };
+
+  const flushEventRefresh = () => {
+    if (eventRefreshTimer === null) {
+      return;
+    }
+    clearEventRefreshTimer();
+    void refresh({ ...lastListOptions, force: true });
+  };
+
+  const scheduleEventRefresh = () => {
+    const now = Date.now();
+    eventRefreshDeadline ??= now + SESSION_EVENT_REFRESH_MAX_WAIT_MS;
+    if (eventRefreshTimer !== null) {
+      globalThis.clearTimeout(eventRefreshTimer);
+    }
+    const delay = Math.min(
+      SESSION_EVENT_REFRESH_DEBOUNCE_MS,
+      Math.max(0, eventRefreshDeadline - now),
+    );
+    eventRefreshTimer = globalThis.setTimeout(() => {
+      eventRefreshTimer = null;
+      eventRefreshDeadline = null;
+      void refresh({ ...lastListOptions, force: true });
+    }, delay);
+  };
+
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === "hidden") {
+      flushEventRefresh();
+    }
+  };
+  const observesPageLifecycle =
+    typeof document !== "undefined" && typeof globalThis.addEventListener === "function";
+  if (observesPageLifecycle) {
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    globalThis.addEventListener("pagehide", flushEventRefresh);
+  }
 
   const refreshReplacement = (agentId?: string | null) => {
     // Mutation refreshes replace the visible sidebar rows. A foreground probe
@@ -1833,6 +1915,7 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     connectionConnected = connected;
     if (connectionChanged) {
       const hadPullRequestSummaries = pullRequestSummaries.size > 0;
+      clearEventRefreshTimer();
       connectionEpoch += 1;
       if (previousClient) {
         resetSessionMessageSubscriptionRegistry(previousClient);
@@ -1894,9 +1977,9 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
           }
         }
       })();
-      return;
     }
-    void refresh();
+    // Gateway snapshots also change for recovery scope, presence, and canvas metadata.
+    // Only a connection transition owns list hydration; refreshing here duplicates startup work.
   });
   const stopEvents = gateway.subscribeEvents((event) => {
     if (isSessionStateEvent(event)) {
@@ -1939,8 +2022,9 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
         });
       }
       // Gateway lists are filtered and windowed. Events cannot preserve server
-      // membership or ordering, so the coalesced refresh remains canonical.
-      void refresh({ ...lastListOptions, force: true });
+      // membership or ordering, so the coalesced refresh remains canonical. Only
+      // events debounce, with a max wait; explicit refreshes and page exit flush it.
+      scheduleEventRefresh();
     }
   });
 
@@ -1962,6 +2046,7 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     create,
     patch,
     setModelOverride,
+    patchRowLocal,
     isPreparedWorkSession(key) {
       return preparedWorkSessionKeys.has(key.trim());
     },
@@ -1998,6 +2083,13 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
       return () => listeners.delete(listener);
     },
     dispose() {
+      // Page teardown must start the trailing refresh synchronously before the
+      // disposed guard makes the capability inert.
+      flushEventRefresh();
+      if (observesPageLifecycle) {
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+        globalThis.removeEventListener("pagehide", flushEventRefresh);
+      }
       for (const subscription of ownedMessageSubscriptions) {
         void releaseSessionMessageSubscription(subscription).catch(() => undefined);
       }

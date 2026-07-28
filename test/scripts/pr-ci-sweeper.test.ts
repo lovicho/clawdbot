@@ -278,12 +278,17 @@ describe("classifyRunForRevive", () => {
 });
 
 type FakeCall = { method: string; args: Record<string, unknown> };
-type FakeWorkflowRun = Parameters<typeof classifyRunForRevive>[0]["run"] & { id: number };
+type FakeWorkflowRun = Parameters<typeof classifyRunForRevive>[0]["run"] & {
+  id: number;
+  workflow_id: number | null;
+};
 type FakeCheckRun = {
+  id: number;
+  name: string;
   status?: string;
   conclusion: string | null;
   app: { slug: string } | null;
-  details_url: string | null;
+  details_url: string | null | undefined;
 };
 
 function fakeGithub(options: {
@@ -292,13 +297,16 @@ function fakeGithub(options: {
     string,
     Array<{ conclusion: string | null; event?: string; id?: number; status?: string }>
   >;
-  checksByRef?: Record<string, FakeCheckRun[]>;
+  checksByRef?: Record<string, FakeCheckRun[] | FakeCheckRun[][]>;
   workflowRunsById?: Record<number, FakeWorkflowRun>;
-  pullsGetByNumber?: Record<number, Record<string, unknown>>;
+  workflowRunErrorsById?: Record<number, Error>;
+  pullsGetByNumber?: Record<number, Record<string, unknown> | Array<Record<string, unknown>>>;
   events?: Array<Record<string, unknown>>;
   pageSize?: number;
 }) {
   const calls: FakeCall[] = [];
+  const pullsGetCallCounts = new Map<number, number>();
+  const checksListCallCounts = new Map<string, number>();
   const record = (method: string, args: Record<string, unknown>) => {
     calls.push({ method, args });
   };
@@ -339,7 +347,15 @@ function fakeGithub(options: {
         );
       }
       if (endpoint.endpointName === "checks.listForRef") {
-        return Promise.resolve(options.checksByRef?.[args.ref as string] ?? []);
+        const ref = args.ref as string;
+        const configured = options.checksByRef?.[ref] ?? [];
+        if (Array.isArray(configured[0])) {
+          const snapshots = configured as FakeCheckRun[][];
+          const callIndex = checksListCallCounts.get(ref) ?? 0;
+          checksListCallCounts.set(ref, callIndex + 1);
+          return Promise.resolve(snapshots[Math.min(callIndex, snapshots.length - 1)] ?? []);
+        }
+        return Promise.resolve(configured as FakeCheckRun[]);
       }
       if (endpoint.endpointName === "issues.listEvents") {
         return Promise.resolve(options.events ?? []);
@@ -351,9 +367,13 @@ function fakeGithub(options: {
         list: { endpointName: "pulls.list" },
         get: (args: Record<string, unknown>) => {
           record("pulls.get", args);
-          const match =
-            options.pullsGetByNumber?.[args.pull_number as number] ??
-            options.prs.find((entry) => entry.number === args.pull_number);
+          const pullNumber = args.pull_number as number;
+          const configured = options.pullsGetByNumber?.[pullNumber];
+          const callIndex = pullsGetCallCounts.get(pullNumber) ?? 0;
+          pullsGetCallCounts.set(pullNumber, callIndex + 1);
+          const match = Array.isArray(configured)
+            ? configured[Math.min(callIndex, configured.length - 1)]
+            : (configured ?? options.prs.find((entry) => entry.number === pullNumber));
           return Promise.resolve({ data: match });
         },
         update: (args: Record<string, unknown>) => {
@@ -365,7 +385,12 @@ function fakeGithub(options: {
         listWorkflowRuns: { endpointName: "actions.listWorkflowRuns" },
         getWorkflowRun: (args: Record<string, unknown>) => {
           record("actions.getWorkflowRun", args);
-          return Promise.resolve({ data: options.workflowRunsById?.[args.run_id as number] });
+          const runId = args.run_id as number;
+          const error = options.workflowRunErrorsById?.[runId];
+          if (error) {
+            return Promise.reject(error);
+          }
+          return Promise.resolve({ data: options.workflowRunsById?.[runId] });
         },
         reRunWorkflow: (args: Record<string, unknown>) => {
           record("actions.reRunWorkflow", args);
@@ -410,6 +435,8 @@ function autoMergePr(number: number, headSha: string) {
 
 function githubActionsCheck(runId: number, overrides: Partial<FakeCheckRun> = {}): FakeCheckRun {
   return {
+    id: runId,
+    name: "proof",
     conclusion: "cancelled",
     status: "completed",
     app: { slug: "github-actions" },
@@ -421,6 +448,7 @@ function githubActionsCheck(runId: number, overrides: Partial<FakeCheckRun> = {}
 function cancelledRun(runId: number, overrides: Partial<FakeWorkflowRun> = {}): FakeWorkflowRun {
   return {
     id: runId,
+    workflow_id: 10,
     conclusion: "cancelled",
     event: "pull_request_target",
     run_attempt: 1,
@@ -544,6 +572,54 @@ describe("runPrCiSweeper", () => {
     ).toEqual([]);
   });
 
+  it("does not spend the re-fire budget on PRs that change during revalidation", async () => {
+    const dropped = Array.from({ length: 11 }, (_, index) => ({
+      ...pr(),
+      number: 200 + index,
+      state: "open",
+      head: { sha: index.toString(16).padStart(2, "0").repeat(20) },
+    }));
+    const pullsGetByNumber = Object.fromEntries(
+      dropped
+        .slice(0, 10)
+        .map((candidate) => [
+          candidate.number,
+          [candidate, { ...candidate, head: { sha: "f".repeat(40) } }],
+        ]),
+    );
+    const { github, calls } = fakeGithub({ prs: dropped, runsBySha: {}, pullsGetByNumber });
+    const { core: loggedCore, logs } = recordingCore();
+
+    const results = await runPrCiSweeper({
+      github: github as never,
+      context: context as never,
+      core: loggedCore as never,
+      now: NOW,
+    });
+
+    expect(results.slice(0, 10)).toEqual(
+      dropped.slice(0, 10).map((candidate) => ({
+        number: candidate.number,
+        sha: candidate.head.sha.slice(0, 12),
+        action: "skip",
+        reason: "changed-during-sweep",
+      })),
+    );
+    expect(results.at(-1)).toEqual({
+      number: 210,
+      sha: "0a".repeat(6),
+      action: "refire",
+      reason: "ci-run-missing",
+    });
+    expect(calls.filter((call) => call.method === "pulls.update").map((call) => call.args)).toEqual(
+      [
+        { owner: "openclaw", repo: "openclaw", pull_number: 210, state: "closed" },
+        { owner: "openclaw", repo: "openclaw", pull_number: 210, state: "open" },
+      ],
+    );
+    expect(logs.at(-1)).toContain("1 re-fire");
+  });
+
   it("stops listing pages once creation dates cross the lookback", async () => {
     const recent = { ...pr(), number: 30, state: "open", head: { sha: "7".repeat(40) } };
     const oldA = {
@@ -641,6 +717,336 @@ describe("runPrCiSweeper", () => {
     // Discovery plus the pre-mutation attempt reclassification both fetch the run.
     expect(calls.filter((call) => call.method === "actions.getWorkflowRun")).toHaveLength(2);
     expect(calls.filter((call) => call.method === "pulls.update")).toEqual([]);
+  });
+
+  it.each([
+    {
+      name: "same-name successful",
+      replacementName: "proof",
+      status: "completed",
+      conclusion: "success",
+    },
+    {
+      name: "queued",
+      replacementName: "proof",
+      status: "queued",
+      conclusion: null,
+    },
+    {
+      name: "in-progress",
+      replacementName: "proof",
+      status: "in_progress",
+      conclusion: null,
+    },
+    {
+      name: "renamed",
+      replacementName: "renamed proof",
+      status: "completed",
+      conclusion: "success",
+    },
+  ])(
+    "does not revive a cancelled run superseded by a $name workflow run",
+    async ({ replacementName, status, conclusion }) => {
+      const generated = autoMergePr(40, "4".repeat(40));
+      const { github, calls } = fakeGithub({
+        prs: [generated],
+        runsBySha: {},
+        checksByRef: {
+          [generated.head.sha]: [
+            githubActionsCheck(100),
+            githubActionsCheck(200, { name: replacementName, status, conclusion }),
+          ],
+        },
+        workflowRunsById: {
+          100: cancelledRun(100),
+          200: cancelledRun(200, { conclusion }),
+        },
+      });
+
+      await runPrCiSweeper({
+        github: github as never,
+        context: context as never,
+        core: core as never,
+        now: NOW,
+      });
+
+      expect(calls.filter((call) => call.method === "actions.reRunWorkflow")).toEqual([]);
+    },
+  );
+
+  it("does not let a newer run from another workflow suppress a cancelled run", async () => {
+    const generated = autoMergePr(41, "5".repeat(40));
+    const { github, calls } = fakeGithub({
+      prs: [generated],
+      runsBySha: {},
+      checksByRef: {
+        [generated.head.sha]: [
+          githubActionsCheck(100),
+          githubActionsCheck(200, { conclusion: "success" }),
+        ],
+      },
+      workflowRunsById: {
+        100: cancelledRun(100),
+        200: cancelledRun(200, { workflow_id: 20, conclusion: "success" }),
+      },
+    });
+
+    await runPrCiSweeper({
+      github: github as never,
+      context: context as never,
+      core: core as never,
+      now: NOW,
+    });
+
+    expect(calls.filter((call) => call.method === "actions.reRunWorkflow")).toEqual([
+      {
+        method: "actions.reRunWorkflow",
+        args: { owner: "openclaw", repo: "openclaw", run_id: 100 },
+      },
+    ]);
+    expect(
+      calls.filter((call) => call.method === "actions.getWorkflowRun" && call.args.run_id === 200),
+    ).toHaveLength(1);
+  });
+
+  it.each([
+    { name: "manual dispatch", replacement: { event: "workflow_dispatch" } },
+    { name: "push event", replacement: { event: "push" } },
+    { name: "different pull-request event", replacement: { event: "pull_request" } },
+    { name: "different head branch", replacement: { head_branch: "automation/another-pr" } },
+    { name: "missing head branch", replacement: { head_branch: null } },
+    {
+      name: "fork head repository",
+      replacement: { head_repository: { full_name: "someone-else/openclaw" } },
+    },
+    { name: "missing head repository", replacement: { head_repository: undefined } },
+    {
+      name: "run predating the pull request",
+      replacement: { created_at: new Date(NOW - 3 * HOURS).toISOString() },
+    },
+  ])(
+    "does not let a newer $name from the same workflow suppress the PR run",
+    async ({ replacement }) => {
+      const generated = autoMergePr(48, "c".repeat(40));
+      const { github, calls } = fakeGithub({
+        prs: [generated],
+        runsBySha: {},
+        checksByRef: {
+          [generated.head.sha]: [
+            githubActionsCheck(100),
+            githubActionsCheck(200, { conclusion: "success" }),
+          ],
+        },
+        workflowRunsById: {
+          100: cancelledRun(100),
+          200: cancelledRun(200, { conclusion: "success", ...replacement }),
+        },
+      });
+
+      await runPrCiSweeper({
+        github: github as never,
+        context: context as never,
+        core: core as never,
+        now: NOW,
+      });
+
+      expect(calls.filter((call) => call.method === "actions.reRunWorkflow")).toEqual([
+        {
+          method: "actions.reRunWorkflow",
+          args: { owner: "openclaw", repo: "openclaw", run_id: 100 },
+        },
+      ]);
+      expect(
+        calls.filter(
+          (call) => call.method === "actions.getWorkflowRun" && call.args.run_id === 200,
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    { name: "successful", status: "completed", conclusion: "success" },
+    { name: "queued", status: "queued", conclusion: null },
+    { name: "in-progress", status: "in_progress", conclusion: null },
+  ])("does not report a $name replacement as a dry-run revive", async ({ status, conclusion }) => {
+    const generated = autoMergePr(42, "6".repeat(40));
+    const { github, calls } = fakeGithub({
+      prs: [generated],
+      runsBySha: {},
+      checksByRef: {
+        [generated.head.sha]: [
+          githubActionsCheck(100),
+          githubActionsCheck(200, { status, conclusion }),
+        ],
+      },
+      workflowRunsById: {
+        100: cancelledRun(100),
+        200: cancelledRun(200, { conclusion }),
+      },
+    });
+    const { core: loggedCore, logs } = recordingCore();
+
+    await runPrCiSweeper({
+      github: github as never,
+      context: context as never,
+      core: loggedCore as never,
+      dryRun: true,
+      now: NOW,
+    });
+
+    expect(calls.filter((call) => call.method === "actions.reRunWorkflow")).toEqual([]);
+    expect(logs.some((line) => line.includes("would revive cancelled run 100"))).toBe(false);
+  });
+
+  it("does not revive a run superseded during pre-mutation revalidation", async () => {
+    const generated = autoMergePr(43, "7".repeat(40));
+    const cancelled = githubActionsCheck(100);
+    const replacement = githubActionsCheck(200, { conclusion: "success" });
+    const { github, calls } = fakeGithub({
+      prs: [generated],
+      runsBySha: {},
+      checksByRef: {
+        [generated.head.sha]: [[cancelled], [cancelled, replacement]],
+      },
+      workflowRunsById: {
+        100: cancelledRun(100),
+        200: cancelledRun(200, { conclusion: "success" }),
+      },
+    });
+
+    await runPrCiSweeper({
+      github: github as never,
+      context: context as never,
+      core: core as never,
+      now: NOW,
+    });
+
+    expect(calls.filter((call) => call.method === "checks.listForRef")).toHaveLength(2);
+    expect(calls.filter((call) => call.method === "actions.reRunWorkflow")).toEqual([]);
+  });
+
+  it.each([
+    { name: "cancelled run", cancelledWorkflowId: null, replacementWorkflowId: 10 },
+    { name: "replacement run", cancelledWorkflowId: 10, replacementWorkflowId: null },
+  ])(
+    "does not revive when the $name has no verifiable workflow identity",
+    async ({ cancelledWorkflowId, replacementWorkflowId }) => {
+      const generated = autoMergePr(44, "8".repeat(40));
+      const { github, calls } = fakeGithub({
+        prs: [generated],
+        runsBySha: {},
+        checksByRef: {
+          [generated.head.sha]: [
+            githubActionsCheck(100),
+            githubActionsCheck(200, { conclusion: "success" }),
+          ],
+        },
+        workflowRunsById: {
+          100: cancelledRun(100, { workflow_id: cancelledWorkflowId }),
+          200: cancelledRun(200, {
+            workflow_id: replacementWorkflowId,
+            conclusion: "success",
+          }),
+        },
+      });
+
+      await runPrCiSweeper({
+        github: github as never,
+        context: context as never,
+        core: core as never,
+        now: NOW,
+      });
+
+      expect(calls.filter((call) => call.method === "actions.reRunWorkflow")).toEqual([]);
+    },
+  );
+
+  it.each([
+    { name: "missing", detailsUrl: null },
+    { name: "undefined", detailsUrl: undefined },
+    { name: "malformed", detailsUrl: "https://github.com/openclaw/openclaw/actions/runs/nope" },
+  ])("does not revive when an Actions replacement has a $name run URL", async ({ detailsUrl }) => {
+    const generated = autoMergePr(46, "a".repeat(40));
+    const { github, calls } = fakeGithub({
+      prs: [generated],
+      runsBySha: {},
+      checksByRef: {
+        [generated.head.sha]: [
+          githubActionsCheck(100),
+          githubActionsCheck(200, { conclusion: "success", details_url: detailsUrl }),
+        ],
+      },
+      workflowRunsById: { 100: cancelledRun(100) },
+    });
+
+    await runPrCiSweeper({
+      github: github as never,
+      context: context as never,
+      core: core as never,
+      now: NOW,
+    });
+
+    expect(calls.filter((call) => call.method === "actions.reRunWorkflow")).toEqual([]);
+  });
+
+  it("does not let a malformed non-Actions check suppress a cancelled workflow", async () => {
+    const generated = autoMergePr(47, "b".repeat(40));
+    const { github, calls } = fakeGithub({
+      prs: [generated],
+      runsBySha: {},
+      checksByRef: {
+        [generated.head.sha]: [
+          githubActionsCheck(100),
+          githubActionsCheck(200, {
+            app: { slug: "external-ci" },
+            conclusion: "success",
+            details_url: null,
+          }),
+        ],
+      },
+      workflowRunsById: { 100: cancelledRun(100) },
+    });
+
+    await runPrCiSweeper({
+      github: github as never,
+      context: context as never,
+      core: core as never,
+      now: NOW,
+    });
+
+    expect(calls.filter((call) => call.method === "actions.reRunWorkflow")).toEqual([
+      {
+        method: "actions.reRunWorkflow",
+        args: { owner: "openclaw", repo: "openclaw", run_id: 100 },
+      },
+    ]);
+  });
+
+  it("fails closed when replacement workflow metadata cannot be loaded", async () => {
+    const generated = autoMergePr(45, "9".repeat(40));
+    const { github, calls } = fakeGithub({
+      prs: [generated],
+      runsBySha: {},
+      checksByRef: {
+        [generated.head.sha]: [
+          githubActionsCheck(100),
+          githubActionsCheck(200, { conclusion: "success" }),
+        ],
+      },
+      workflowRunsById: { 100: cancelledRun(100) },
+      workflowRunErrorsById: { 200: new Error("replacement workflow unavailable") },
+    });
+
+    await expect(
+      runPrCiSweeper({
+        github: github as never,
+        context: context as never,
+        core: core as never,
+        now: NOW,
+      }),
+    ).rejects.toThrow("replacement workflow unavailable");
+
+    expect(calls.filter((call) => call.method === "actions.reRunWorkflow")).toEqual([]);
   });
 
   it("does not revive a run triggered from a different branch on a shared commit", async () => {
