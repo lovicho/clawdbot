@@ -55,6 +55,7 @@ jobs:
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         id: app-token-fallback
         if: steps.app-token.outcome == 'failure'
+        continue-on-error: true
         with:
           app-id: "2971289"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY_FALLBACK }}
@@ -67,13 +68,13 @@ jobs:
         if: ${{ github.event.action != 'edited' || github.event.changes.base }}
         with:
           configuration-path: .github/labeler.yml
-          repo-token: ${{ steps.app-token.outputs.token || steps.app-token-fallback.outputs.token }}
+          repo-token: ${{ steps.app-token.outputs.token || steps.app-token-fallback.outputs.token || github.token }}
           sync-labels: true
       - name: Apply PR size label
         if: ${{ github.event.action != 'edited' || github.event.changes.base }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
-          github-token: ${{ steps.app-token.outputs.token || steps.app-token-fallback.outputs.token }}
+          github-token: ${{ steps.app-token.outputs.token || steps.app-token-fallback.outputs.token || github.token }}
           script: |
             const pullRequest = context.payload.pull_request;
             if (!pullRequest) {
