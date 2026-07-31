@@ -67,6 +67,8 @@ predicate allowedRawSocketClientCall(Expr call) {
   // This TLS layer wraps the managed CONNECT socket; it cannot open a direct route.
   allowedOwnerScope(call, "src/infra/push-apns-http2.ts", "openApnsTlsTunnel")
   or
+  allowedOwnerScope(call, "src/infra/push-apns-http2.ts", "openApnsTlsTunnel")
+  or
   allowedOwnerScope(call, "src/infra/push-apns-http2.ts", "openProxiedApnsHttp2Session")
   or
   allowedOwnerScope(call, "src/infra/push-apns-http2.ts", "connectApnsHttp2Session")

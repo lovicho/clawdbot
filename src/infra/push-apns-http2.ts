@@ -113,6 +113,8 @@ async function openApnsTlsTunnel(params: {
   timeoutMs: number;
   signal?: AbortSignal;
 }): Promise<tls.TLSSocket> {
+  // Managed/proxied APNs path: this raw TLS client is layered over an
+  // operator-configured Proxyline CONNECT socket, never direct user egress.
   // CONNECT ignores URL paths. Strip path metadata before Proxyline sees it so
   // tokens embedded in a configured proxy URL cannot surface in errors.
   const proxyUrl = normalizeConnectProxyUrl(params.proxyUrl);
