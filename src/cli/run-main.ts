@@ -287,6 +287,20 @@ async function disposeCliAgentHarnesses(): Promise<void> {
   }
 }
 
+async function closeCliMcpLoopbackServer(): Promise<void> {
+  try {
+    const { getActiveMcpLoopbackRuntime } = await import("../gateway/mcp-http.loopback-runtime.js");
+    if (!getActiveMcpLoopbackRuntime()) {
+      return;
+    }
+    const { closeMcpLoopbackServer } = await import("../gateway/mcp-http.js");
+    await closeMcpLoopbackServer();
+  } catch {
+    // Best-effort teardown for short-lived CLI commands. A command result is
+    // already final, so cleanup must not replace its outcome.
+  }
+}
+
 function isUnconfiguredConfigSnapshot(
   snapshot: Pick<ConfigFileSnapshot, "exists" | "valid" | "sourceConfig">,
 ): boolean {
@@ -1442,7 +1456,7 @@ async function runCliWithPreparedOutputMode(
           isBenignUncaughtExceptionError,
           isUncaughtExceptionHandled,
         },
-        { restoreTerminalState },
+        { restoreRuntimeTerminalState },
       ] = await startupTrace.measure("core-imports", () =>
         Promise.all([
           import("./program.js"),
@@ -1450,7 +1464,7 @@ async function runCliWithPreparedOutputMode(
           import("./failure-output.js"),
           import("../infra/fatal-error-hooks.js"),
           import("../infra/unhandled-rejections.js"),
-          import("../../packages/terminal-core/src/restore.js"),
+          import("../runtime.js"),
         ]),
       );
       const program = await startupTrace.measure("build-program", () => buildProgram());
@@ -1480,7 +1494,7 @@ async function runCliWithPreparedOutputMode(
         for (const message of runFatalErrorHooks({ reason: "uncaught_exception", error })) {
           console.error("[openclaw]", message);
         }
-        restoreTerminalState("uncaught exception", { resumeStdinIfPaused: false });
+        restoreRuntimeTerminalState("uncaught exception", { resumeStdinIfPaused: false });
         process.exit(1);
       });
 
@@ -1579,6 +1593,7 @@ async function runCliWithPreparedOutputMode(
     uninstallGatewayRunRuntimeHooks?.();
     await stopStartedProxy();
     await disposeCliAgentHarnesses();
+    await closeCliMcpLoopbackServer();
     await closeCliMemoryManagers();
     pauseNonTtyStdinForCliExit();
   }
