@@ -3,6 +3,55 @@ import { readQaScenarioById } from "./scenario-catalog.js";
 import { requireFlowScenario } from "./scenario-catalog.test-utils.js";
 
 describe("qa compaction scenario catalog", () => {
+  it.each([
+    {
+      id: "compaction-empty-response-recovery",
+      coverage: "session-memory.compaction-empty-response-recovery",
+      faultMode: "empty-output-once",
+      summaryMarker: "QA-COMPACTION-EMPTY-RECOVERED-SUMMARY",
+    },
+    {
+      id: "compaction-reasoning-only-recovery",
+      coverage: "session-memory.compaction-reasoning-only-recovery",
+      faultMode: "reasoning-only-output-once",
+      summaryMarker: "QA-COMPACTION-REASONING-RECOVERED-SUMMARY",
+    },
+  ])("keeps $id on the OpenClaw compaction owner", ({ id, coverage, faultMode, summaryMarker }) => {
+    const scenario = requireFlowScenario(readQaScenarioById(id));
+    const flow = JSON.stringify(scenario.execution.flow);
+    const serializedScenario = JSON.stringify(scenario);
+
+    expect(scenario.runtimePairLane).toBeUndefined();
+    expect(scenario.coverage?.primary).toEqual([coverage]);
+    expect(scenario.coverage?.secondary ?? []).toEqual([]);
+    expect(scenario.gatewayConfigPatch).toMatchObject({
+      agents: { defaults: { compaction: { mode: "default" } } },
+    });
+    expect(flow).toContain("OPENCLAW_QA_FORCE_RUNTIME === 'openclaw'");
+    expect(flow).toContain("initialRequests[0].errorCode === 'context_length_exceeded'");
+    expect(flow).toContain("initialRequests.length === 2");
+    expect(flow).toContain("compactionSummaryRequests.length === 2");
+    expect(flow).toContain(
+      `compactionSummaryRequests[0].compactionSummaryFaultMode === config.faultMode`,
+    );
+    expect(flow).toContain("compactionSummaryRequests[1].compactionSummaryFaultMode === 'none'");
+    expect(flow).toContain(
+      "compactionSummaryRequests[0].cursor < compactionSummaryRequests[1].cursor",
+    );
+    expect(flow).toContain(
+      "scenarioRequests.every((request) => request.model === scenarioRequests[0].model)",
+    );
+    expect(flow).toContain("transcript.compactionSummaries.length === 1");
+    expect(flow).toContain("transcript.compactionSummaries[0].includes(config.summaryMarker)");
+    expect(flow).toContain("String(transcript.finalText ?? '').trim() === config.finalMarker");
+    expect(flow).toContain("sessionEntry?.compactionCount === 1");
+    expect(flow).toContain("request.requestKind === 'tool-continuation'");
+    expect(flow).toContain("finalOutbound.length === 1");
+    expect(serializedScenario).toContain(faultMode);
+    expect(serializedScenario).toContain(summaryMarker);
+    expect(serializedScenario).not.toContain("codex");
+  });
+
   it("assigns compaction retry and pruning to OpenClaw with an early Codex gap", () => {
     const scenario = requireFlowScenario(readQaScenarioById("compaction-retry-mutating-tool"));
     const flow = JSON.stringify(scenario.execution.flow);
@@ -24,7 +73,7 @@ describe("qa compaction scenario catalog", () => {
       "OpenClaw performs exactly one successful write, one causal continuation, and returns the exact file content and final marker.",
     );
     expect(scenario.successCriteria).toContain(
-      "OpenClaw proves session-memory.pruning by retaining tail blocks 11..15 while pruning marker block 10.",
+      "OpenClaw proves session-memory.pruning by retaining a nonempty contiguous suffix ending at block 15 while pruning marker block 10.",
     );
     expect(scenario.successCriteria).toContain(
       "The Codex runtime-pair cell reports a known harness gap before gateway, session, or provider work and makes no compaction coverage claim.",
@@ -49,6 +98,14 @@ describe("qa compaction scenario catalog", () => {
         },
       },
     ]);
+    const runtimeGuard = scenario.execution.flow?.steps[0]?.actions[1] as
+      | Record<string, unknown>
+      | undefined;
+    expect(runtimeGuard?.assert).toMatchObject({
+      expr: expect.stringContaining(
+        "(env.gateway.runtimeEnv.OPENCLAW_QA_FORCE_RUNTIME ?? 'openclaw') === 'openclaw'",
+      ),
+    });
 
     const knownGapIndex = flow.indexOf(knownGap);
     const gatewayWorkIndex = flow.indexOf('"call":"waitForGatewayHealthy"');
@@ -109,7 +166,9 @@ describe("qa compaction scenario catalog", () => {
     );
     expect(flow).toContain("!String(writeRequest.allInputText ?? '').includes(config.bulkyMarker)");
     expect(flow).toContain("JSON.stringify(overflowEvidence.tailBlocks)");
-    expect(flow).toContain("JSON.stringify(['11', '12', '13', '14', '15'])");
+    expect(flow).toContain("writeEvidence.tailBlocks.length > 0");
+    expect(flow).toContain("!writeEvidence.tailBlocks.includes('10')");
+    expect(flow).toContain("16 - writeEvidence.tailBlocks.length + index");
     expect(serializedScenario).not.toContain("remote-compaction");
     expect(serializedScenario).not.toContain("remoteCompaction");
     expect(flow).not.toContain("JSON.stringify(overflowRequest)");
