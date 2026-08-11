@@ -2,6 +2,7 @@
 
 import { expectDefined } from "@openclaw/normalization-core";
 import { MAX_DATE_TIMESTAMP_MS } from "@openclaw/normalization-core/number-coercion";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { ProviderPlugin } from "../../plugins/types.js";
@@ -189,8 +190,6 @@ vi.mock("../../plugins/provider-auth-choice-helpers.js", async (importOriginal) 
   const actual =
     await importOriginal<typeof import("../../plugins/provider-auth-choice-helpers.js")>();
   const normalize = (value: string | undefined) => value?.trim().toLowerCase() ?? "";
-  const isRecord = (value: unknown): value is Record<string, unknown> =>
-    Boolean(value && typeof value === "object" && !Array.isArray(value));
   const mergePatch = <T>(base: T, patch: unknown): T => {
     if (!isRecord(base) || !isRecord(patch)) {
       return patch as T;
@@ -273,7 +272,7 @@ const {
   modelsAuthPasteApiKeyCommand,
   modelsAuthPasteTokenCommand,
   modelsAuthSetupTokenCommand,
-  runModelsAuthLoginFlow,
+  runModelsAuthLoginFlowCore,
 } = await import("./auth.js");
 
 function createRuntime(): RuntimeEnv {
@@ -864,7 +863,7 @@ describe("modelsAuthLoginCommand", () => {
     const runtime = createRuntime();
     const abortController = new AbortController();
 
-    await runModelsAuthLoginFlow({
+    await runModelsAuthLoginFlowCore({
       provider: "openai",
       method: "oauth",
       config: currentConfig,
@@ -899,7 +898,7 @@ describe("modelsAuthLoginCommand", () => {
     });
 
     await expect(
-      runModelsAuthLoginFlow({
+      runModelsAuthLoginFlowCore({
         provider: "openai",
         method: "oauth",
         config: currentConfig,

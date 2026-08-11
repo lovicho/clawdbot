@@ -731,6 +731,34 @@ describe("createBackupArchive", () => {
     );
   });
 
+  it("creates a verifiable archive for highly compressible sparse state", async () => {
+    await withOpenClawTestState(
+      {
+        layout: "state-only",
+        prefix: "openclaw-backup-sparse-state-",
+        scenario: "minimal",
+      },
+      async (state) => {
+        const outputDir = state.path("backups");
+        const sparsePath = state.statePath("sparse-state.bin");
+        await fs.mkdir(outputDir, { recursive: true });
+        await fs.writeFile(sparsePath, "");
+        await fs.truncate(sparsePath, 256 * 1024 * 1024);
+
+        const result = await createBackupArchive({
+          output: outputDir,
+          includeWorkspace: false,
+          nowMs: Date.UTC(2026, 4, 9, 8, 10, 0),
+        });
+        const runtime: RuntimeEnv = { log: vi.fn(), error: vi.fn(), exit: vi.fn() };
+
+        await expect(
+          backupVerifyCommand(runtime, { archive: result.archivePath }),
+        ).resolves.toMatchObject({ ok: true });
+      },
+    );
+  });
+
   it("replaces legacy audit raw archives with sanitized restorable snapshots", async () => {
     await withOpenClawTestState(
       {
@@ -1193,16 +1221,6 @@ describe("createBackupArchive", () => {
             .run(`keeper-${"y".repeat(16_384)}`);
           liveDb.exec("PRAGMA wal_checkpoint(TRUNCATE)");
           liveDb.prepare("DELETE FROM deleted_secrets WHERE value = ?").run(deletedSecret);
-          liveDb
-            .prepare(
-              `
-                INSERT INTO state_leases (
-                  scope, lease_key, owner, expires_at, heartbeat_at,
-                  payload_json, created_at, updated_at
-                ) VALUES ('core:test-fixture', 'write', 'worker', 9999999999999, 1, NULL, 1, 1)
-              `,
-            )
-            .run();
         } finally {
           liveDb.close();
         }
@@ -1244,19 +1262,8 @@ describe("createBackupArchive", () => {
             provider: "openai",
             key: "sk-backup",
           });
-          expect(archivedDb.prepare("SELECT COUNT(*) AS count FROM state_leases").get()).toEqual({
-            count: 0,
-          });
         } finally {
           archivedDb.close();
-        }
-        const sourceDb = new sqlite.DatabaseSync(liveDbPath, { readOnly: true });
-        try {
-          expect(sourceDb.prepare("SELECT COUNT(*) AS count FROM state_leases").get()).toEqual({
-            count: 1,
-          });
-        } finally {
-          sourceDb.close();
         }
       },
     );

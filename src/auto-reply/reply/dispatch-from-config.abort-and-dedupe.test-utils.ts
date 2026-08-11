@@ -975,7 +975,7 @@ describe("dispatchReplyFromConfig", () => {
       [sourceStorePath]: { [sourceSessionKey]: sourceEntry },
       [targetStorePath]: { [boundSessionKey]: targetEntry },
     };
-    sessionStoreMocks.resolveStorePath.mockImplementation(
+    sessionStoreMocks.resolveSessionStorePathCore.mockImplementation(
       (_configuredPath?: unknown, options?: { agentId?: string }) =>
         options?.agentId === "opencode" ? targetStorePath : sourceStorePath,
     );
@@ -1423,6 +1423,8 @@ describe("dispatchReplyFromConfig", () => {
           channelLabel: channel === "discord" ? "Discord" : "Signal",
           accountId: "default",
           requestGateway: async <T>() => ({ ok: true }) as T,
+          shouldHandle: () => true,
+          classifyRoute: () => "unbound",
         })
       : undefined;
     reporter?.start();
@@ -1471,6 +1473,8 @@ describe("dispatchReplyFromConfig", () => {
       channelLabel: "Signal",
       accountId: "default",
       requestGateway: async <T>() => ({ ok: true }) as T,
+      shouldHandle: () => true,
+      classifyRoute: () => "unbound",
     });
     reporter.start();
     try {
