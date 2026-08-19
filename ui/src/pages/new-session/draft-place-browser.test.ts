@@ -50,7 +50,7 @@ function createBrowser(request: (method: string) => Promise<unknown>, data?: New
       canStartAsDraft: false,
       visibility: "normal",
       cloudProfileId: "",
-      pendingCloud: { sessionKey: "", gatewayUrl: "", recoveryScope: "" },
+      pendingPlacement: { sessionKey: "", gatewayUrl: "", recoveryScope: "" },
       agentsHydrated: false,
     }),
     {
@@ -60,7 +60,7 @@ function createBrowser(request: (method: string) => Promise<unknown>, data?: New
       onVisibilityRetired: vi.fn(),
       onCloudProfileCleared: vi.fn(),
       onCloudState: vi.fn(),
-      onPendingCloudReset: vi.fn(),
+      onPendingPlacementReset: vi.fn(),
       onRecoveryReady: vi.fn(),
       onAdoptAgentDefaults: vi.fn(),
     },
@@ -71,9 +71,6 @@ function createBrowser(request: (method: string) => Promise<unknown>, data?: New
     gateway,
     () => ({
       context,
-      nodes: [],
-      folder: "",
-      execNode: "",
       isAdmin: false,
     }),
     {
@@ -125,7 +122,6 @@ describe("DraftPlaceBrowser", () => {
         sessions: [{ execCwd: "/workspace/recent" }],
         workspace: "/workspace",
         workspaceRoots: ["/workspace"],
-        execNodes: [],
         isAdmin: false,
       }),
     ).toEqual([
