@@ -10,7 +10,11 @@ import type {
   PluginHookGatewayContext,
   PluginHookGatewayStartEvent,
 } from "../plugins/hook-types.js";
+import { registerPluginHttpRoute } from "../plugins/http-registry.js";
+import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
+import { getPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
+import type { OpenClawPluginServiceContext } from "../plugins/types.js";
 import {
   getActiveGatewayRootWorkCount,
   resetGatewayWorkAdmission,
@@ -1442,6 +1446,72 @@ describe("startGatewayPostAttachRuntime", () => {
     expect(events).toEqual(["startup-loaded-start", "startup-loaded-end", "sidecars"]);
   });
 
+  it("adopts a winning plugin generation without publishing stale deferred startup state", async () => {
+    const startupRegistry = {
+      plugins: [{ id: "startup", status: "loaded" }],
+      typedHooks: [],
+    } as never;
+    const winningRegistry = {
+      plugins: [{ id: "replacement", status: "loaded" }],
+      typedHooks: [],
+    } as never;
+    let startupClaimCurrent = true;
+    let releasePluginLoad: (() => void) | undefined;
+    const pluginLoadReady = new Promise<void>((resolve) => {
+      releasePluginLoad = resolve;
+    });
+    const pluginRuntimeClaim = {
+      isCurrent: () => startupClaimCurrent,
+      waitForUnblocked: async () => true,
+      publish: (publish: () => void) => {
+        if (!startupClaimCurrent) {
+          return false;
+        }
+        publish();
+        return true;
+      },
+    };
+    const onStartupPluginsLoaded = vi.fn();
+    const onPluginServices = vi.fn();
+    const onSidecarsReady = vi.fn();
+    const unlockStartupMethods = vi.fn();
+    const startGatewaySidecarsCandidate = vi.fn(
+      async (params: Parameters<typeof startGatewaySidecarsImpl>[0]) => {
+        expect(params.pluginRegistry).toBe(winningRegistry);
+        expect(params.shouldStartPluginServices?.()).toBe(false);
+        return { pluginServices: null, postReadySidecars: [] };
+      },
+    );
+    const loadStartupPlugins = vi.fn(async () => {
+      await pluginLoadReady;
+      return { pluginRegistry: startupRegistry, gatewayMethods: ["startup.method"] };
+    });
+
+    const runtime = await startGatewayPostAttachRuntime(
+      createPostAttachParams({
+        sidecarStartup: "defer",
+        loadStartupPlugins,
+        onStartupPluginsLoaded,
+        onPluginServices,
+        onSidecarsReady,
+        unlockStartupMethods,
+        pluginRuntimeClaim,
+        getCurrentPluginRegistry: () => winningRegistry,
+      }),
+      createPostAttachRuntimeDeps({ startGatewaySidecars: startGatewaySidecarsCandidate }),
+    );
+    await waitForGatewayTestState(() => expect(loadStartupPlugins).toHaveBeenCalledOnce());
+    startupClaimCurrent = false;
+    releasePluginLoad?.();
+    await expect(runtime.startupSettled).resolves.toBeUndefined();
+
+    expect(onStartupPluginsLoaded).not.toHaveBeenCalled();
+    expect(startGatewaySidecarsCandidate).toHaveBeenCalledOnce();
+    expect(onPluginServices).not.toHaveBeenCalled();
+    expect(unlockStartupMethods).toHaveBeenCalledOnce();
+    expect(onSidecarsReady).toHaveBeenCalledOnce();
+  });
+
   it("waits for sidecars by default before returning", async () => {
     let resumeSidecars: (() => void) | undefined;
     const sidecarsReady = new Promise<{ pluginServices: null; postReadySidecars: [] }>(
@@ -2077,6 +2147,126 @@ describe("startGatewayPostAttachRuntime", () => {
     expect(onPluginServices).toHaveBeenLastCalledWith(null);
   });
 
+  it("forwards strict replacement cleanup through the deferred plugin service owner", async () => {
+    const serviceStop = vi.fn(async () => {});
+    const startedServices = { stop: serviceStop };
+    const publishedOwner: { current: PluginServicesHandle | null } = { current: null };
+    hoisted.startPluginServices.mockImplementationOnce(async (params) => {
+      params.onHandle?.(startedServices);
+      return startedServices;
+    });
+
+    await startGatewaySidecars({
+      cfg: { hooks: { internal: { enabled: false } } } as never,
+      pluginRegistry: createPostAttachParams().pluginRegistry,
+      defaultWorkspaceDir: "/tmp/openclaw-workspace",
+      deps: {} as never,
+      startChannels: vi.fn(async () => {}),
+      onPluginServices: (handle) => {
+        publishedOwner.current = handle;
+      },
+      log: { warn: vi.fn() },
+      logHooks: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      logChannels: { info: vi.fn(), error: vi.fn() },
+    });
+
+    expect(publishedOwner.current).not.toBeNull();
+    const replacement = { strict: true, deadlineAtMs: Date.now() + 5_000 } as const;
+    await publishedOwner.current?.stop(replacement);
+    expect(serviceStop).toHaveBeenCalledWith(replacement);
+  });
+
+  it("fences late service capabilities when deferred ownership consumes the replacement deadline", async () => {
+    vi.useFakeTimers();
+    const actualServices =
+      await vi.importActual<typeof import("../plugins/services.js")>("../plugins/services.js");
+    const registry = createEmptyPluginRegistry();
+    const broadcastPluginEvent = vi.fn();
+    let context: OpenClawPluginServiceContext | undefined;
+    let releaseCleanup: (() => void) | undefined;
+    const cleanupReleased = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    registry.services.push({
+      pluginId: "deferred-deadline",
+      source: "test",
+      origin: "workspace",
+      service: {
+        id: "deferred-deadline-service",
+        start: (serviceContext) => {
+          context = serviceContext;
+          registerPluginHttpRoute({
+            path: "/deferred-deadline-route",
+            auth: "plugin",
+            handler: vi.fn(),
+          });
+        },
+        stop: async () => {
+          await cleanupReleased;
+        },
+      },
+    });
+    hoisted.startPluginServices.mockImplementationOnce(async (params) => {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 4_900);
+      });
+      return await actualServices.startPluginServices(
+        params as Parameters<typeof actualServices.startPluginServices>[0],
+      );
+    });
+    const publishedOwner: { current: PluginServicesHandle | null } = { current: null };
+    let stopping: Promise<void> | undefined;
+    let sidecars: ReturnType<typeof startGatewaySidecars> | undefined;
+
+    try {
+      sidecars = startGatewaySidecars({
+        cfg: { hooks: { internal: { enabled: false } } } as never,
+        pluginRegistry: registry,
+        defaultWorkspaceDir: "/tmp/openclaw-workspace",
+        deps: {} as never,
+        startChannels: vi.fn(async () => {}),
+        broadcastPluginEvent,
+        onPluginServices: (handle) => {
+          publishedOwner.current = handle;
+        },
+        log: { warn: vi.fn() },
+        logHooks: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        logChannels: { info: vi.fn(), error: vi.fn() },
+      });
+      await waitForGatewayTestState(() => {
+        expect(hoisted.startPluginServices).toHaveBeenCalledOnce();
+      });
+      if (!publishedOwner.current) {
+        throw new Error("deferred plugin service owner was not published");
+      }
+
+      const deadlineAtMs = Date.now() + 5_000;
+      let failure: unknown;
+      stopping = publishedOwner.current
+        .stop({ strict: true, deadlineAtMs })
+        .catch((error: unknown) => {
+          failure = error;
+        });
+
+      await vi.advanceTimersByTimeAsync(4_900);
+      expect(registry.httpRoutes).toHaveLength(1);
+      expect(failure).toBeUndefined();
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect(registry.httpRoutes).toEqual([]);
+      expect(() => context?.gatewayEvents?.emit("late", {}, { scope: "operator.read" })).toThrow(
+        "no longer active",
+      );
+      expect(broadcastPluginEvent).not.toHaveBeenCalled();
+    } finally {
+      releaseCleanup?.();
+      await stopping;
+      await sidecars;
+      vi.useRealTimers();
+    }
+  });
+
   it("reports deferred plugin services after core startup returns", async () => {
     await withEnvAsync(
       { OPENCLAW_SKIP_CHANNELS: undefined, OPENCLAW_SKIP_PROVIDERS: undefined },
@@ -2289,6 +2479,28 @@ describe("startGatewayPostAttachRuntime", () => {
         ["fullCatalogConcurrencyLimitCount", 1],
       ],
     });
+  });
+
+  it("prepares the model runtime with the active Gateway plugin registry", async () => {
+    const pluginRegistry = createPostAttachParams().pluginRegistry;
+    const prewarmPrimaryModel = vi.fn(async () => {
+      expect(getPluginRuntimeGatewayRequestScope()?.pluginRegistry).toBe(pluginRegistry);
+    });
+
+    await startGatewaySidecars({
+      cfg: { hooks: { internal: { enabled: false } } } as never,
+      pluginRegistry,
+      defaultWorkspaceDir: "/tmp/openclaw-workspace",
+      deps: {} as never,
+      startChannels: vi.fn(async () => {}),
+      log: { warn: vi.fn() },
+      logHooks: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      logChannels: { info: vi.fn(), error: vi.fn() },
+      prewarmPrimaryModel,
+    });
+
+    expect(prewarmPrimaryModel).toHaveBeenCalledOnce();
+    expect(getPluginRuntimeGatewayRequestScope()).toBeUndefined();
   });
 
   it("marks startup main-session orphans before model runtime and channel startup", async () => {
