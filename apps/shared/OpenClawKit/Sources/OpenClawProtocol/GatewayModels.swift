@@ -7341,17 +7341,20 @@ public struct SessionTypingParams: Codable, Sendable {
     public let agentid: String?
     public let sessionid: String
     public let typing: Bool
+    public let preview: String?
 
     public init(
         sessionkey: String,
         agentid: String? = nil,
         sessionid: String,
-        typing: Bool)
+        typing: Bool,
+        preview: String? = nil)
     {
         self.sessionkey = sessionkey
         self.agentid = agentid
         self.sessionid = sessionid
         self.typing = typing
+        self.preview = preview
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -7359,6 +7362,7 @@ public struct SessionTypingParams: Codable, Sendable {
         case agentid = "agentId"
         case sessionid = "sessionId"
         case typing
+        case preview
     }
 }
 
@@ -7386,6 +7390,7 @@ public struct SessionTypingEvent: Codable, Sendable {
     public let agentid: String
     public let actor: SessionSharingIdentity
     public let typing: Bool
+    public let preview: String?
     public let ts: Int
 
     public init(
@@ -7394,6 +7399,7 @@ public struct SessionTypingEvent: Codable, Sendable {
         agentid: String,
         actor: SessionSharingIdentity,
         typing: Bool,
+        preview: String? = nil,
         ts: Int)
     {
         self.sessionkey = sessionkey
@@ -7401,6 +7407,7 @@ public struct SessionTypingEvent: Codable, Sendable {
         self.agentid = agentid
         self.actor = actor
         self.typing = typing
+        self.preview = preview
         self.ts = ts
     }
 
@@ -7410,6 +7417,7 @@ public struct SessionTypingEvent: Codable, Sendable {
         case agentid = "agentId"
         case actor
         case typing
+        case preview
         case ts
     }
 }
@@ -11019,6 +11027,52 @@ public struct DecisionReceiptV1: Codable, Sendable {
     }
 }
 
+public struct DecisionReceiptDisplayV1: Codable, Sendable {
+    public let schemaversion: Double
+    public let selectorid: String
+    public let occurredat: Int
+    public let action: [String: AnyCodable]
+    public let decision: [String: AnyCodable]
+    public let enforcement: [String: AnyCodable]
+    public let provenance: AnyCodable
+    public let missingevidence: [String]
+    public let remediation: [[String: AnyCodable]]
+
+    public init(
+        schemaversion: Double,
+        selectorid: String,
+        occurredat: Int,
+        action: [String: AnyCodable],
+        decision: [String: AnyCodable],
+        enforcement: [String: AnyCodable],
+        provenance: AnyCodable,
+        missingevidence: [String],
+        remediation: [[String: AnyCodable]])
+    {
+        self.schemaversion = schemaversion
+        self.selectorid = selectorid
+        self.occurredat = occurredat
+        self.action = action
+        self.decision = decision
+        self.enforcement = enforcement
+        self.provenance = provenance
+        self.missingevidence = missingevidence
+        self.remediation = remediation
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaversion = "schemaVersion"
+        case selectorid = "selectorId"
+        case occurredat = "occurredAt"
+        case action
+        case decision
+        case enforcement
+        case provenance
+        case missingevidence = "missingEvidence"
+        case remediation
+    }
+}
+
 public struct AuditRunIdentityPresentV1: Codable, Sendable {
     public let state: String
     public let context: ExecutionIdentityContextV1
@@ -11157,7 +11211,7 @@ public struct AuditRunInspectResult: Codable, Sendable {
     public let schemaversion: Double
     public let run: [String: AnyCodable]
     public let identity: AuditRunIdentityV1
-    public let decisions: [DecisionReceiptV1]
+    public let decisiondisplays: [DecisionReceiptDisplayV1]
     public let coverage: [String: AnyCodable]
     public let nextdecisioncursor: String?
     public let nextexecutioncursor: String?
@@ -11166,7 +11220,7 @@ public struct AuditRunInspectResult: Codable, Sendable {
         schemaversion: Double,
         run: [String: AnyCodable],
         identity: AuditRunIdentityV1,
-        decisions: [DecisionReceiptV1],
+        decisiondisplays: [DecisionReceiptDisplayV1],
         coverage: [String: AnyCodable],
         nextdecisioncursor: String? = nil,
         nextexecutioncursor: String? = nil)
@@ -11174,7 +11228,7 @@ public struct AuditRunInspectResult: Codable, Sendable {
         self.schemaversion = schemaversion
         self.run = run
         self.identity = identity
-        self.decisions = decisions
+        self.decisiondisplays = decisiondisplays
         self.coverage = coverage
         self.nextdecisioncursor = nextdecisioncursor
         self.nextexecutioncursor = nextexecutioncursor
@@ -11184,7 +11238,7 @@ public struct AuditRunInspectResult: Codable, Sendable {
         case schemaversion = "schemaVersion"
         case run
         case identity
-        case decisions
+        case decisiondisplays = "decisionDisplays"
         case coverage
         case nextdecisioncursor = "nextDecisionCursor"
         case nextexecutioncursor = "nextExecutionCursor"
