@@ -6,7 +6,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { getContextWindowCaches } from "../agents/context-cache.js";
 import {
@@ -163,12 +163,14 @@ vi.mock("./session-transcript-readers.js", async (importOriginal) => {
   return { ...actual, readSessionMessageCountAsync: sessionTranscriptReaderMocks.readCount };
 });
 
+let gitWorkspaceTemplate: string;
 const { createSessionStoreDir, createSelectedGlobalSessionStore, openClient } =
-  setupGatewaySessionsTestHarness();
+  setupGatewaySessionsTestHarness(async (makeTempDir) => {
+    gitWorkspaceTemplate = await createGitWorkspace(makeTempDir("openclaw-session-git-template-"));
+  });
 const execFileAsync = promisify(execFile);
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
-let gitWorkspaceTemplateRoot: string;
-let gitWorkspaceTemplate: string;
+const directoryLinkType = process.platform === "win32" ? "junction" : "dir";
 
 async function waitForCreatedSessionRun(
   context: { chatAbortControllers: Map<string, ChatAbortControllerEntry> },
@@ -193,17 +195,6 @@ async function waitForCreatedSessionRun(
   }
   return removed;
 }
-
-beforeAll(async () => {
-  gitWorkspaceTemplateRoot = await fs.realpath(
-    await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "openclaw-session-git-template-")),
-  );
-  gitWorkspaceTemplate = await createGitWorkspace(gitWorkspaceTemplateRoot);
-});
-
-afterAll(async () => {
-  await fs.rm(gitWorkspaceTemplateRoot, { recursive: true, force: true });
-});
 
 // Read the real implementations back here rather than capturing them inside the
 // mock factories: Vitest runs a factory on first import of the mocked module, and
@@ -358,7 +349,7 @@ test.each([
       expect(created.payload?.outcomes).toEqual([{ ok: true, key }]);
     }
     expect(loadSessionEntry({ agentId: "main", sessionKey: key, storePath })).toMatchObject({
-      createdActor: { type: "human", id: profile.id },
+      createdActor: { type: "human", source: "profile", id: profile.id },
       sandbox: "required",
     });
 
@@ -443,7 +434,7 @@ test("operator role agent allowlists protect creation without blocking existing 
   await writeSessionStore({
     entries: {
       [existingKey]: sessionStoreEntry("role-existing-session", {
-        createdActor: { type: "human", id: profile.id },
+        createdActor: { type: "human", source: "profile", id: profile.id },
       }),
     },
   });
@@ -502,7 +493,7 @@ test("sessions.create revalidates parent participation before committing a fork 
     entries: {
       [parentSessionKey]: sessionStoreEntry(parentSessionId, {
         visibility: "read-only",
-        createdActor: { type: "human", id: "owner" },
+        createdActor: { type: "human", source: "profile", id: "owner" },
       }),
     },
   });
@@ -1803,6 +1794,11 @@ test("sessions.create provisions and reuses a session worktree for later runs", 
       ownerId: key,
     });
 
+    const retainedDraft = path.join(worktree!.path, "session-draft.txt");
+    await fs.writeFile(retainedDraft, "uncommitted work survives reuse\n");
+    const originalHead = (await execFileAsync("git", ["-C", worktree!.path, "rev-parse", "HEAD"]))
+      .stdout;
+
     const recreated = await directSessionReq<{
       entry: { spawnedCwd?: string };
       worktree: { id: string; path: string; branch: string };
@@ -1814,7 +1810,12 @@ test("sessions.create provisions and reuses a session worktree for later runs", 
     expect(recreated.ok).toBe(true);
     expect(recreated.payload?.worktree).toEqual(worktree);
     expect(recreated.payload?.entry.spawnedCwd).toBe(worktree?.path);
-    expect(createSpy).toHaveBeenCalledTimes(1);
+    await expect(fs.readFile(retainedDraft, "utf8")).resolves.toBe(
+      "uncommitted work survives reuse\n",
+    );
+    expect((await execFileAsync("git", ["-C", worktree!.path, "rev-parse", "HEAD"])).stdout).toBe(
+      originalHead,
+    );
     expect(
       listRegistryWorktrees(process.env).filter(
         (record) =>
@@ -2901,29 +2902,39 @@ test("sessions.create rejects a regular-file Gateway cwd before creating session
   }
 });
 
-test("sessions.create allows a write-scoped cwd inside the configured workspace", async () => {
-  const workspace = tempDirs.make("openclaw-session-cwd-workspace-");
-  const cwd = path.join(workspace, "packages", "app");
-  await fs.mkdir(cwd, { recursive: true });
-  testState.agentConfig = { workspace };
-  await createSessionStoreDir();
-  const { ws } = await openClient({
-    scopes: ["operator.write"],
-    deviceIdentityPath: path.join(workspace, "write-cwd-device.json"),
-  });
-  try {
-    const created = await rpcReq<{
-      entry?: { sessionRoot?: string; spawnedCwd?: string };
-    }>(ws, "sessions.create", { cwd });
+test.each(["operator.admin", "operator.write"])(
+  "sessions.create canonicalizes sandbox workspace aliases for %s",
+  async (scope) => {
+    const root = tempDirs.make("openclaw-session-cwd-workspace-");
+    const workspace = path.join(root, "workspace");
+    const alias = path.join(root, "alias");
+    const cwd = path.join(workspace, "packages", "app");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.symlink(workspace, alias, directoryLinkType);
+    testState.agentConfig = { workspace: alias, sandbox: { mode: "all" } };
+    const { storePath } = await createSessionStoreDir();
+    const { ws } = await openClient({
+      scopes: [scope],
+      deviceIdentityPath: path.join(root, "cwd-device.json"),
+    });
+    try {
+      const key = "agent:main:dashboard:canonical-cwd";
+      const created = await rpcReq<{
+        entry?: { sessionRoot?: string; spawnedCwd?: string };
+      }>(ws, "sessions.create", { key, cwd });
 
-    expect(created.ok, JSON.stringify(created.error)).toBe(true);
-    expect(created.payload?.entry?.spawnedCwd).toBe(cwd);
-    expect(created.payload?.entry?.sessionRoot).toBe(cwd);
-  } finally {
-    ws.close();
-    testState.agentConfig = undefined;
-  }
-});
+      expect(created.ok, JSON.stringify(created.error)).toBe(true);
+      expect(created.payload?.entry).toMatchObject({ sessionRoot: cwd, spawnedCwd: cwd });
+      expect(loadSessionEntry({ sessionKey: key, storePath })).toMatchObject({
+        sessionRoot: cwd,
+        spawnedCwd: cwd,
+      });
+    } finally {
+      ws.close();
+      testState.agentConfig = undefined;
+    }
+  },
+);
 
 test("sessions.create records the selected agent workspace when cwd is omitted", async () => {
   const workspace = tempDirs.make("openclaw-session-default-root-");
@@ -3034,43 +3045,42 @@ test("sessions.create keeps its cwd contract absolute-only", async () => {
   });
 });
 
-test("sessions.create rejects cwd outside a sandboxed agent workspace", async () => {
-  testState.agentConfig = { workspace: "/tmp/safe-workspace", sandbox: { mode: "all" } };
-  try {
-    const created = await directSessionReq(
-      "sessions.create",
-      { cwd: "/tmp/outside" },
-      { client: { connect: { scopes: ["operator.admin"] } } as never },
-    );
-
-    expect(created.ok).toBe(false);
-    expect(created.error).toMatchObject({
-      code: "INVALID_REQUEST",
-      message: "sessions.create cwd is outside the sandboxed agent workspace",
+test.each(["direct path", "symlink escape"])(
+  "sessions.create rejects sandboxed admin cwd via %s without creating a session",
+  async (kind) => {
+    const root = tempDirs.make("openclaw-session-sandbox-workspace-");
+    const workspace = path.join(root, "workspace");
+    const outside = path.join(root, "outside");
+    await fs.mkdir(workspace);
+    await fs.mkdir(outside);
+    const link = path.join(workspace, "escape");
+    await fs.symlink(outside, link, directoryLinkType);
+    testState.agentConfig = { workspace, sandbox: { mode: "all" } };
+    const { storePath } = await createSessionStoreDir();
+    const { ws } = await openClient({
+      scopes: ["operator.admin"],
+      deviceIdentityPath: path.join(root, "admin-device.json"),
     });
-  } finally {
-    testState.agentConfig = undefined;
-  }
-});
-
-test("sessions.create allows cwd within a sandboxed agent workspace", async () => {
-  const workspace = tempDirs.make("openclaw-session-sandbox-workspace-");
-  testState.agentConfig = { workspace, sandbox: { mode: "all" } };
-  try {
-    const cwd = path.join(workspace, "packages", "app");
-    await fs.mkdir(cwd, { recursive: true });
-    const created = await directSessionReq(
-      "sessions.create",
-      { cwd },
-      { client: { connect: { scopes: ["operator.admin"] } } as never },
-    );
-
-    expect(created.ok).toBe(true);
-    expect((created.payload as { entry?: { spawnedCwd?: string } })?.entry?.spawnedCwd).toBe(cwd);
-  } finally {
-    testState.agentConfig = undefined;
-  }
-});
+    try {
+      const key = "agent:main:dashboard:denied-cwd";
+      const created = await rpcReq(ws, "sessions.create", {
+        key,
+        cwd: kind === "direct path" ? outside : link,
+      });
+      expect(created).toMatchObject({
+        ok: false,
+        error: {
+          code: "INVALID_REQUEST",
+          message: "sessions.create cwd is outside the sandboxed agent workspace",
+        },
+      });
+      expect(loadSessionEntry({ sessionKey: key, storePath })).toBeUndefined();
+    } finally {
+      ws.close();
+      testState.agentConfig = undefined;
+    }
+  },
+);
 
 test("sessions.create skips the worktree setup script for non-admin callers", async () => {
   const openClawState = await createOpenClawTestState({
@@ -4749,7 +4759,7 @@ test("sessions.create stamps trusted operator provenance and records created", a
   expect(created.ok).toBe(true);
   expect(created.payload?.entry).toMatchObject({
     createdVia: "operator",
-    createdActor: { type: "human", id: profileId },
+    createdActor: { type: "human", source: "profile", id: profileId },
     createdAt: expect.any(Number),
   });
   expect(created.payload?.entry).not.toHaveProperty("createdActor.label");
@@ -4784,7 +4794,10 @@ test("sessions.create stamps trusted operator provenance and records created", a
 
   for (const { actor, sandbox } of [
     { actor: { type: "agent", id: "main" }, sandbox: undefined },
-    { actor: { type: "human", id: "profile-delegated-creator" }, sandbox: "required" },
+    {
+      actor: { type: "human", source: "profile", id: "profile-delegated-creator" },
+      sandbox: "required",
+    },
   ] as const) {
     // The required parent's creation policy survives removal of gateway.roles.
     const hinted = await directSessionReq<{
@@ -4825,7 +4838,7 @@ test("sessions.create reset-in-place preserves the node creation stamp", async (
     entries: {
       main: sessionStoreEntry("existing-main", {
         createdVia: "channel",
-        createdActor: { type: "human", id: "telegram:42" },
+        createdActor: { type: "human", source: "channel", id: "telegram:42" },
         createdAt: 1234,
       }),
     },
@@ -4850,12 +4863,12 @@ test("sessions.create reset-in-place preserves the node creation stamp", async (
   expect(reset.ok).toBe(true);
   expect(reset.payload?.entry).toMatchObject({
     createdVia: "channel",
-    createdActor: { type: "human", id: "telegram:42" },
+    createdActor: { type: "human", source: "channel", id: "telegram:42" },
     createdAt: 1234,
   });
   expect(loadSessionEntry({ sessionKey: "agent:main:main", storePath })).toMatchObject({
     createdVia: "channel",
-    createdActor: { type: "human", id: "telegram:42" },
+    createdActor: { type: "human", source: "channel", id: "telegram:42" },
     createdAt: 1234,
   });
 });
