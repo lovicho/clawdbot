@@ -422,6 +422,53 @@ describe("sessions_spawn tool", () => {
     });
   });
 
+  it("declares expectsCompletionMessage and forwards false to hidden, ACP, and visible spawns", async () => {
+    registerAcpBackendForTest();
+    await withTestDir({ prefix: "openclaw-spawn-completion-" }, async (dir) => {
+      const callGateway = vi.fn(async () => ({
+        key: "agent:main:dashboard:child",
+        runStarted: true,
+        runId: "run-visible",
+      }));
+      const registerRun = vi.fn();
+      const tool = createSessionsSpawnTool({
+        agentSessionKey: "agent:main:main",
+        config: { session: { store: path.join(dir, "sessions.json") } },
+        callGateway: callGateway as never,
+        registerRun,
+        countActiveRuns: () => 0,
+      });
+      const schema = tool.parameters as {
+        properties?: Record<string, { type?: string } | undefined>;
+      };
+      expect(schema.properties?.expectsCompletionMessage).toMatchObject({ type: "boolean" });
+
+      await tool.execute("hidden", { task: "hidden child", expectsCompletionMessage: false });
+      expect(
+        mockCallArg(hoisted.spawnSubagentDirectMock, 0, 0, "spawnSubagentDirect")
+          .expectsCompletionMessage,
+      ).toBe(false);
+
+      await tool.execute("acp", {
+        task: "ACP child",
+        runtime: "acp",
+        expectsCompletionMessage: false,
+      });
+      expect(
+        mockCallArg(hoisted.spawnAcpDirectMock, 0, 0, "spawnAcpDirect").expectsCompletionMessage,
+      ).toBe(false);
+
+      await tool.execute("visible", {
+        task: "visible child",
+        visible: true,
+        expectsCompletionMessage: false,
+      });
+      expect(registerRun).toHaveBeenCalledWith(
+        expect.objectContaining({ expectsCompletionMessage: false }),
+      );
+    });
+  });
+
   it("forwards collector parameters and requesting run identity when enabled", async () => {
     const tool = createSessionsSpawnTool({
       agentSessionKey: "agent:main:main",
@@ -1273,6 +1320,58 @@ describe("sessions_spawn tool", () => {
     });
     expect(callGateway).not.toHaveBeenCalled();
   });
+
+  it.each(["inherit", "require"] as const)(
+    "admits a required parent's visible child with sandbox=%s while agent sandboxing is off",
+    async (sandbox) => {
+      await withTestDir({ prefix: "openclaw-visible-required-parent-" }, async (dir) => {
+        const storePath = path.join(dir, "sessions.json");
+        const parentSessionKey = "agent:main:main";
+        await upsertSessionEntryCore(
+          { agentId: "main", sessionKey: parentSessionKey, storePath },
+          {
+            sessionId: "required-parent",
+            updatedAt: 1,
+            createdVia: "operator",
+            createdActor: { type: "human", source: "profile", id: "guest-profile" },
+            sandbox: "required",
+          },
+        );
+        hoisted.inProcessCreationMock.mockResolvedValue({
+          key: "agent:main:dashboard:required-child",
+          runStarted: true,
+          runId: "required-visible-run",
+        });
+        const tool = createSessionsSpawnTool({
+          agentSessionKey: parentSessionKey,
+          config: {
+            session: { store: storePath },
+            agents: {
+              defaults: { sandbox: { mode: "off" } },
+              entries: { main: { workspace: dir } },
+            },
+          },
+          countActiveRuns: () => 0,
+        });
+
+        const result = await tool.execute("required-visible-spawn", {
+          task: "inspect the project in an isolated child",
+          visible: true,
+          sandbox,
+        });
+
+        expect(result.details).toMatchObject({
+          status: "accepted",
+          childSessionKey: "agent:main:dashboard:required-child",
+        });
+        expect(hoisted.inProcessCreationMock).toHaveBeenCalledWith(
+          "sessions.create",
+          expect.objectContaining({ parentSessionKey }),
+          expect.objectContaining({ requesterSessionKey: parentSessionKey }),
+        );
+      });
+    },
+  );
 
   it.each(["off", "all"] as const)(
     "uses the global requester sandbox mode %s for visible children",
