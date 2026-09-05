@@ -546,6 +546,48 @@ export const en: TranslationMap & {
     },
     holdOneHour: "Hold 1 h",
     reviewUpdate: "Review update",
+    run: {
+      title: "Update progress",
+      phases: "Update phases",
+      steps: "Installation steps",
+      details: "Step details",
+      noDetails: "No step details recorded yet.",
+      verification: "Verification checks",
+      report: "Update report",
+      restarting: "Gateway restarting…",
+      reconnecting: "Reconnecting automatically. Update progress is saved on the gateway.",
+      progress: "{completed} of {total} phases complete",
+      phase: {
+        requested: "Requested",
+        staging: "Staging",
+        validating: "Validating",
+        repairing: "Repairing",
+        activating: "Activating",
+        restarting: "Restarting",
+        verifying: "Verifying",
+        finished: "Finished",
+      },
+      step: {
+        completed: "Complete",
+        in_progress: "In progress",
+        pending: "Pending",
+        failed: "Failed",
+        skipped: "Skipped",
+      },
+      oracle: {
+        service: "Service",
+        version: "Version",
+        plugins: "Plugins",
+        channels: "Channels",
+        inference: "Inference",
+      },
+      oracleState: {
+        pass: "Passed",
+        warn: "Not verified",
+        fail: "Failed",
+        pending: "Pending",
+      },
+    },
     confirm: {
       action: "Update and restart",
     },
@@ -898,6 +940,8 @@ export const en: TranslationMap & {
     cloudRecoveryUnavailable:
       "Cloud workers are unavailable because this connection does not support task recovery. Reconnect or update the Gateway.",
     placementStartFailed: "The session was created, but runner startup failed: {error}",
+    placementReloadBlocked: "Recovery needs a reload. Unsaved starts will be lost.",
+    discardUnsavedAndReload: "Discard unsaved starts and reload",
     placementSyncsFolder: "Syncs {folder} to the selected runner",
     folder: "Folder",
     folderPlaceholder: "Agent workspace",
@@ -1241,6 +1285,7 @@ export const en: TranslationMap & {
     forkedSession: "Forked session",
     copySessionId: "Session ID",
     copySessionLink: "Session link",
+    copySessionPreviewLink: "Preview link",
     copyMarkdown: "Conversation as Markdown",
     openNewTab: "New tab",
     openNewWindow: "New window",
@@ -1790,6 +1835,7 @@ export const en: TranslationMap & {
     rawTitle: "Edit raw JSON/JSON5 config",
     rawUnavailableTitle: "Raw mode unavailable for this snapshot",
     open: "Open",
+    fileOpenedOnGateway: "Configuration file opened on Gateway host.",
     applying: "Applying…",
     autoSaveSaving: "Saving…",
     autoSaveSaved: "Saved",
@@ -3105,9 +3151,9 @@ export const en: TranslationMap & {
       progress: "{complete} of {total}",
     },
     toolSearch: {
-      title: "Tool Search",
+      title: "Tool Search for all models",
       description:
-        "Keep a bounded tool directory visible and defer the rest behind search, so large MCP and plugin catalogs stop crowding the prompt.",
+        "Local models use Tool Search automatically. Enable this override to defer tool schemas for all models; turning it off restores each model's default.",
     },
     loopDetection: {
       title: "Tool-loop detection",
@@ -3117,7 +3163,7 @@ export const en: TranslationMap & {
     localModelLean: {
       title: "Lean tools for local models",
       description:
-        "Drop heavyweight default tools that smaller local models handle poorly, leaving a shorter set they can use reliably.",
+        "Remove optional tools such as browser and automations. Leave this off to keep those capabilities available through Tool Search.",
     },
     cliAgents: {
       title: "CLI agents",
@@ -3192,6 +3238,7 @@ export const en: TranslationMap & {
     ctaAppStore: "App Store",
     ctaPlayStore: "Google Play",
     ctaDownload: "Download",
+    ctaOpenMac: "Open in Mac app",
     ctaDocs: "Docs",
     ctaSetupGuide: "Setup guide",
     ctaChromeWebStore: "Chrome Web Store",
@@ -3309,6 +3356,8 @@ export const en: TranslationMap & {
     account: "Publication account",
     choose: "Choose an account",
     newAction: "Choose a new publication",
+    capacity:
+      'Too many publications are awaiting review. Finish an existing publication, then select "{newAction}" to make room. Existing retries remain available.',
     confirm: "Confirm original publication",
     check: "Check publication",
     refresh: "Refresh publication",
@@ -5431,6 +5480,12 @@ export const en: TranslationMap & {
       showEarlier: "Show earlier",
       loadingEarlier: "Loading earlier history…",
       noMatches: "No matching messages",
+      positionRail: "Conversation position",
+      positionMarker: "{label}, marker {position} of {count}",
+      positionUserMessage: "User message",
+      positionAssistantMessage: "Assistant message",
+      positionMarkerHint:
+        "Use arrow keys to choose a marker, Enter or Space to jump, and Escape to dismiss the preview.",
     },
     pendingInputs: {
       cancelled:
@@ -5606,6 +5661,7 @@ export const en: TranslationMap & {
       stillListening: "Still listening",
       stopVoiceInput: "Stop voice input",
       systemDefaultMicrophone: "System default",
+      useSystemDefaultMicrophoneForCall: "Use System default for this call",
       systemDefaultCamera: "System default",
       switchCamera: "Switch camera",
       turnCameraOff: "Turn camera off",
@@ -5613,6 +5669,7 @@ export const en: TranslationMap & {
       voiceTranscript: "Voice transcript",
     },
     attachments: {
+      allowImage: "Allow image",
       attachedFile: "Attached file",
       audio: "Audio",
       expand: "Open {filename} in the side panel",

@@ -1,5 +1,6 @@
 /* @vitest-environment jsdom */
 
+import { html, render, type nothing, type TemplateResult } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { createApplicationTheme } from "../../app/bootstrap-theme.ts";
@@ -17,8 +18,10 @@ import { sessionMutationGatewayHello } from "../../test-helpers/gateway-methods.
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import "./chat-pane.ts";
 import type { ResolvedBoardView } from "./chat-pane-shared.ts";
+import { createInitialChatRealtimeState } from "./chat-realtime.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
 import {
+  closeSlot,
   openSlot,
   promoteSidebarPanel,
   setSidebarDock,
@@ -56,6 +59,8 @@ type TestChatPane = HTMLElement & {
   createSession: () => Promise<boolean>;
   paneId: string;
   presented: boolean;
+  visuallyPresented: boolean;
+  readonly conversationPresented: boolean;
   presentedChanged: (presented: boolean) => void;
   sessionKey: string;
   resetConfirmationOpen: boolean;
@@ -71,6 +76,10 @@ type TestChatPane = HTMLElement & {
   persistBoardSessionView: (patch: { face?: "chat" | "dashboard"; activeTabId?: string }) => void;
   resolveBoardProvider: () => BoardProvider;
   resolveBoardView: () => ResolvedBoardView;
+  renderBoardPanel: (
+    board: ResolvedBoardView,
+    layout: ChatPageHost["sidebarLayout"],
+  ) => TemplateResult | typeof nothing;
   syncRetainedBoardSession: (board: ResolvedBoardView) => void;
   refreshSwarmRoster: () => void;
   requestUpdate: () => void;
@@ -99,6 +108,7 @@ function createTestPane(sessions: SessionCapability = {} as SessionCapability) {
     gateway: { snapshot: { client, phase: "connected", hello: sessionMutationGatewayHello() } },
   } as unknown as ApplicationContext;
   pane.state = {
+    ...createInitialChatRealtimeState(),
     chatError: null,
     chatLoading: false,
     chatMessages: [],
@@ -172,6 +182,18 @@ function createGatewayBoardPane(params: {
   return { pane, snapshot, client, request, addEventListener, removeListener };
 }
 
+function configureGatewayMainSession(pane: TestChatPane, defaultAgentId: string, mainKey: string) {
+  pane.context.gateway.snapshot.hello = {
+    snapshot: {
+      sessionDefaults: {
+        defaultAgentId,
+        mainKey,
+        mainSessionKey: `agent:${defaultAgentId}:${mainKey}`,
+      },
+    },
+  } as ApplicationContext["gateway"]["snapshot"]["hello"];
+}
+
 beforeEach(() => {
   vi.stubGlobal("localStorage", createStorageMock());
   vi.stubGlobal("sessionStorage", createStorageMock());
@@ -191,6 +213,42 @@ afterEach(() => {
 });
 
 describe("chat pane board shell", () => {
+  it.each(["agent:main:closed-dashboard", "global"])(
+    "keeps an explicitly closed empty dashboard closed when its first content arrives (%s)",
+    async (sessionKey) => {
+      const { pane, request } = createGatewayBoardPane({ sessionKey });
+      pane.sessionKey = sessionKey;
+      pane.routeFace = "chat";
+      pane.onFaceChange = vi.fn();
+      if (sessionKey === "global") {
+        pane.state.agentsList = { defaultId: "main", mainKey: "main", scope: "global", agents: [] };
+        pane.state.assistantAgentId = "work";
+      }
+      const snapshotKey = sessionKey === "global" ? "agent:work:global" : sessionKey;
+      request.mockResolvedValue({ sessionKey: snapshotKey, revision: 1, tabs: [], widgets: [] });
+      const provider = pane.resolveBoardProvider();
+      try {
+        await vi.waitFor(() => expect(provider.hasLoadedSnapshot).toBe(true));
+        pane.syncRetainedBoardSession(pane.resolveBoardView());
+        const closed = closeSlot(openSlot({ columns: [] }, "dashboard"), "dashboard");
+        pane.commitSidebarLayout(closed);
+        patchSettings({ sidebarSessionLayouts: { [sessionKey]: closed } });
+        request.mockResolvedValue({
+          sessionKey: snapshotKey,
+          revision: 2,
+          tabs: [{ tabId: "main", title: "Overview", position: 0, chatDock: "right" }],
+          widgets: [],
+        });
+        await provider.applyOps([{ kind: "tab_create", tabId: "main", title: "Overview" }]);
+        pane.syncRetainedBoardSession(pane.resolveBoardView());
+        expect(pane.state.sidebarLayout).toEqual(closed);
+        expect(pane.onFaceChange).not.toHaveBeenCalled();
+      } finally {
+        (Reflect.get(pane, "releaseBoardProviderLease") as () => void).call(pane);
+      }
+    },
+  );
+
   it("keeps side-panel presentation independent from persisted Board data", () => {
     const pane = createTestPane();
     const provider = mockBoardProvider("agent:main:current");
@@ -233,6 +291,33 @@ describe("chat pane board shell", () => {
     expect(pane.onFaceChange).toHaveBeenCalledOnce();
   });
 
+  it("publishes conversation presentation per pane without overwriting shared session state", () => {
+    const first = createTestPane();
+    const second = createTestPane();
+    second.state = first.state;
+    const provider = mockBoardProvider(first.state.sessionKey);
+    first.boardProvider = provider;
+    second.boardProvider = provider;
+    const changed = vi.fn();
+    first.addEventListener("openclaw-chat-pane-lifecycle-changed", changed);
+    first.updated();
+    second.updated();
+    expect(first.conversationPresented).toBe(true);
+    expect(second.conversationPresented).toBe(true);
+    expect(changed).toHaveBeenCalledOnce();
+
+    first.visuallyPresented = false;
+    expect(first.conversationPresented).toBe(false);
+    expect(second.conversationPresented).toBe(true);
+    expect(changed).toHaveBeenCalledTimes(2);
+    first.presented = false;
+    first.visuallyPresented = true;
+    expect(first.conversationPresented).toBe(false);
+    first.updated();
+    expect(second.conversationPresented).toBe(true);
+    expect(changed).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["terminal", "dashboard"] as const)(
     "applies a focused dashboard link over saved %s main only once",
     (slot) => {
@@ -249,7 +334,8 @@ describe("chat pane board shell", () => {
       pane.state.sidebarLayout = savedLayout;
       patchSettings({ sidebarSessionLayouts: { [pane.sessionKey]: savedLayout } });
 
-      pane.syncRetainedBoardSession(pane.resolveBoardView());
+      pane.updated();
+      expect(pane.conversationPresented).toBe(false);
       expect(pane.state.sidebarLayout.expanded).toBe(true);
       expect(pane.state.sidebarLayout.open).toBe(true);
       expect(sidebarMainPanel(pane.state.sidebarLayout)?.slot).toBe("dashboard");
@@ -258,8 +344,9 @@ describe("chat pane board shell", () => {
       );
 
       pane.state.sidebarLayout = { ...pane.state.sidebarLayout, expanded: false };
-      pane.syncRetainedBoardSession(pane.resolveBoardView());
+      pane.updated();
       expect(pane.state.sidebarLayout.expanded).toBe(false);
+      expect(pane.conversationPresented).toBe(slot === "dashboard");
     },
   );
 
@@ -594,24 +681,7 @@ describe("chat pane board shell", () => {
 
   it("restores one board view across equivalent main session keys", () => {
     const pane = createTestPane();
-    pane.context = {
-      ...pane.context,
-      gateway: {
-        ...pane.context.gateway,
-        snapshot: {
-          ...pane.context.gateway.snapshot,
-          hello: {
-            snapshot: {
-              sessionDefaults: {
-                defaultAgentId: "main",
-                mainKey: "main",
-                mainSessionKey: "agent:main:main",
-              },
-            },
-          } as never,
-        },
-      },
-    };
+    configureGatewayMainSession(pane, "main", "main");
     pane.state.sessionKey = "agent:main:main";
     pane.boardProvider = mockBoardProvider("main");
     pane.routeFace = "dashboard";
@@ -701,27 +771,68 @@ describe("chat pane board shell", () => {
   it("resolves configured main aliases before selecting a provider", () => {
     const pane = createTestPane();
     pane.state.sessionKey = "primary";
-    pane.context = {
-      ...pane.context,
-      gateway: {
-        ...pane.context.gateway,
-        snapshot: {
-          ...pane.context.gateway.snapshot,
-          hello: {
-            snapshot: {
-              sessionDefaults: {
-                defaultAgentId: "work",
-                mainKey: "primary",
-                mainSessionKey: "agent:work:primary",
-              },
-            },
-          } as never,
-        },
-      },
-    };
+    configureGatewayMainSession(pane, "work", "primary");
 
     expect(pane.resolveBoardProvider().snapshot$.value.sessionKey).toBe("agent:work:primary");
   });
+
+  it.each([
+    { key: "notes", acknowledged: "agent:research:notes", globalScope: false },
+    { key: "global", acknowledged: "agent:research:global", globalScope: true },
+    { key: "agent:research:global", acknowledged: "agent:research:global", globalScope: false },
+  ])(
+    "passes the admitted board owner to widgets while retaining $key",
+    async ({ key, acknowledged, globalScope }) => {
+      const { pane, request } = createGatewayBoardPane({ sessionKey: key });
+      pane.state.assistantAgentId = "research";
+      pane.state.agentsList = {
+        defaultId: "main",
+        mainKey: "main",
+        scope: globalScope ? "global" : "per-sender",
+        agents: [],
+      };
+      const snapshot = { sessionKey: acknowledged, revision: 1, tabs: [], widgets: [] };
+      request.mockResolvedValue(snapshot);
+      const container = document.createElement("div");
+      const layout = openSlot({ columns: [] }, "dashboard");
+      const draw = () => render(pane.renderBoardPanel(pane.resolveBoardView(), layout), container);
+      const target = () =>
+        (
+          container.querySelector("openclaw-board-view") as
+            | (HTMLElement & { session: { sessionKey: string; agentId?: string } })
+            | null
+        )?.session;
+      try {
+        const provider = pane.resolveBoardProvider();
+        await vi.waitFor(() => expect(provider.hasLoadedSnapshot).toBe(true));
+        draw();
+        expect(target()).toEqual({ sessionKey: key, agentId: "research" });
+        expect(request).toHaveBeenCalledWith("board.get", {
+          sessionKey: key,
+          ...(key === "notes" ? {} : { agentId: "research" }),
+        });
+        if (key === "notes") {
+          let complete!: (value: typeof snapshot) => void;
+          request.mockReturnValueOnce(
+            new Promise((resolve) => {
+              complete = resolve;
+            }),
+          );
+          pane.state.sessionKey = "replacement-notes";
+          const replacement = pane.resolveBoardProvider();
+          draw();
+          expect(target()).toBeUndefined();
+          complete({ ...snapshot, sessionKey: "agent:work:replacement-notes" });
+          await vi.waitFor(() => expect(replacement.hasLoadedSnapshot).toBe(true));
+          draw();
+          expect(target()).toEqual({ sessionKey: "replacement-notes", agentId: "work" });
+        }
+      } finally {
+        render(html``, container);
+        (Reflect.get(pane, "releaseBoardProviderLease") as () => void).call(pane);
+      }
+    },
+  );
 
   it("keeps global board leases scoped through owner switches, second panes, and acknowledgments", async () => {
     const { pane, client, request, addEventListener, removeListener } = createGatewayBoardPane({
