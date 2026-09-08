@@ -1407,6 +1407,8 @@ printf 'status=%s\\n' "$status"
     expect(wrapper).toContain(
       'FROZEN_PAYLOAD_DIR="${OPENCLAW_INSTALL_SMOKE_FROZEN_PAYLOAD_DIR:-}"',
     );
+    expect(wrapper).toContain('FROZEN_NODE_VERSION="${OPENCLAW_INSTALL_SMOKE_NODE_VERSION:-}"');
+    expect(wrapper).toContain('-e "OPENCLAW_NODE_VERSION=$FROZEN_NODE_VERSION"');
     expect(runner).toContain("Run official installer one-liner for latest release tarball");
     expect(runner).toContain("run_installer_pipeline");
     expect(runner).toContain('--version "$FRESH_TAG_URL"');
@@ -2046,6 +2048,37 @@ run_update_smoke
     expect(result.status, result.stderr).toBe(expectedExit);
   });
 
+  it("accepts legacy same-version apply only with the frozen-target compatibility flag", () => {
+    const url = "http://candidate.invalid/openclaw.tgz";
+    const payload = {
+      status: "ok",
+      before: { version: "2026.7.33" },
+      after: { version: "2026.7.33" },
+      steps: [
+        { name: "global update", exitCode: 0, command: `npm install ${url}` },
+        { name: "global install swap", exitCode: 0 },
+        { name: "openclaw doctor", exitCode: 0 },
+      ],
+    };
+    const run = (allowLegacy: boolean) =>
+      spawnSync(process.execPath, ["-"], {
+        encoding: "utf8",
+        input: extractInstallSmokeUpdateJsonParser(),
+        env: {
+          ...process.env,
+          UPDATE_JSON: JSON.stringify(payload),
+          UPDATE_EXPECT_VERSION: "2026.7.33",
+          UPDATE_BASELINE_VERSION: "2026.7.33",
+          UPDATE_TAG_URL: url,
+          UPDATE_EXPECT_OUTCOME: "already-current",
+          ...(allowLegacy ? { OPENCLAW_INSTALL_ALLOW_LEGACY_SAME_VERSION_APPLY: "1" } : {}),
+        },
+      });
+
+    expect(run(false).status).toBe(1);
+    expect(run(true).status).toBe(0);
+  });
+
   it.each([
     ["successful", { name: "openclaw doctor", exitCode: 0 }],
     [
@@ -2132,6 +2165,7 @@ run_update_smoke
 
     expect(script).toContain("SMOKE_RUNNER_ENV_ARGS=()");
     for (const envName of [
+      "OPENCLAW_INSTALL_ALLOW_LEGACY_SAME_VERSION_APPLY",
       "OPENCLAW_INSTALL_ALLOW_LEGACY_UPDATE_WARNING",
       "OPENCLAW_INSTALL_SELF_UPDATE_WARNING_FIXED_VERSION",
       "OPENCLAW_INSTALL_SMOKE_COMMAND_TIMEOUT",
@@ -2537,37 +2571,7 @@ if [[ "\${1:-}" == */verify-fs-safe-native.mjs ]]; then
 fi
 if [[ "\${1:-}" == */openclaw.mjs ]]; then
   shift
-  if [ "\${1:-}" = "--version" ]; then
-    echo "OpenClaw 2026.6.17"
-  elif [ "\${1:-}" = "--help" ]; then
-    echo "Usage: openclaw"
-  elif [ "\${1:-}" = "infer" ]; then
-    printf '[{"id":"google"},{"id":"openai"},{"id":"xai"}]\n'
-  elif [ "\${1:-}" = "status" ] && [ "$FAKE_STATUS_EXIT" != "0" ]; then
-    echo "synthetic Bun status failure" >&2
-    exit "$FAKE_STATUS_EXIT"
-  elif [ "\${1:-}" = "status" ] || { [ "\${1:-}" = "plugins" ] && [ "\${2:-}" = "list" ]; }; then
-    echo '{}'
-  elif [ "\${1:-}" = "agent" ]; then
-    printf '{"path":"/v1/responses"}\n' >>"$MOCK_REQUEST_LOG"
-    printf '{"payloads":[{"text":"%s"}]}\n' "$SUCCESS_MARKER"
-  elif [ "\${1:-}" = "gateway" ] && [ "\${2:-}" = "health" ]; then
-    echo '{"ok":true}'
-  elif [ "\${1:-}" = "gateway" ]; then
-    port=""
-    while [ "$#" -gt 0 ]; do
-      if [ "$1" = "--port" ]; then
-        port="$2"
-        break
-      fi
-      shift
-    done
-    exec node -e 'const http=require("node:http"); const port=Number(process.argv[1]); http.createServer((req,res)=>{res.writeHead(200,{"content-type":"text/plain"});res.end("ok")}).listen(port,"127.0.0.1",()=>console.log("[gateway] ready at http://127.0.0.1:"+port))' "$port"
-  else
-    echo "unsupported fake OpenClaw command: $*" >&2
-    exit 1
-  fi
-  exit 0
+  exec node "$BUN_INSTALL/install/global/node_modules/openclaw/openclaw.mjs" "$@"
 fi
 test "\${1:-}" = "install"
 case " $* " in
@@ -2600,6 +2604,9 @@ exports.redactSensitiveText = (text) => text;
 REDACTOR
 cat >"$package_root/openclaw.mjs" <<'OPENCLAW'
 #!/usr/bin/env node
+import fs from "node:fs";
+import http from "node:http";
+
 const args = process.argv.slice(2);
 if (args[0] === "--version") {
   console.log("OpenClaw 2026.6.17");
@@ -2607,6 +2614,23 @@ if (args[0] === "--version") {
   console.log("Usage: openclaw");
 } else if (args[0] === "infer") {
   console.log(JSON.stringify([{ id: "google" }, { id: "openai" }, { id: "xai" }]));
+} else if (args[0] === "status" && process.env.FAKE_STATUS_EXIT !== "0") {
+  console.error("synthetic Bun status failure");
+  process.exit(Number(process.env.FAKE_STATUS_EXIT));
+} else if (args[0] === "status" || (args[0] === "plugins" && args[1] === "list")) {
+  console.log("{}");
+} else if (args[0] === "agent") {
+  fs.appendFileSync(process.env.MOCK_REQUEST_LOG, '{"path":"/v1/responses"}\\n');
+  console.log(JSON.stringify({ payloads: [{ text: process.env.SUCCESS_MARKER }] }));
+} else if (args[0] === "gateway" && args[1] === "health") {
+  console.log('{"ok":true}');
+} else if (args[0] === "gateway") {
+  const port = Number(args[args.indexOf("--port") + 1]);
+  http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("ok");
+    })
+    .listen(port, "127.0.0.1", () => console.log("[gateway] ready at http://127.0.0.1:" + port));
 } else {
   process.exit(1);
 }
@@ -2938,6 +2962,12 @@ node -e 'const fs=require("node:fs");const p=process.argv[1];const value=JSON.pa
           "${{ runner.temp }}/install-smoke-candidate-payload",
         OPENCLAW_INSTALL_SMOKE_GROUP: testCase.group,
       });
+      if (testCase.consumerName === "installer_smoke_update") {
+        expect(run.env).toMatchObject({
+          OPENCLAW_INSTALL_ALLOW_LEGACY_SAME_VERSION_APPLY:
+            "${{ inputs.allow_frozen_target_scenario_omissions && '1' || '0' }}",
+        });
+      }
       expect(run.run).toBe("bash .release-harness/scripts/test-install-sh-docker.sh");
     }
 
