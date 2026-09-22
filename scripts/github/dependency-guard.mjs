@@ -15,6 +15,7 @@ import {
   GITHUB_API_REQUEST_TIMEOUT_MS,
   GITHUB_ERROR_BODY_MAX_BYTES,
   GITHUB_RESPONSE_BODY_MAX_BYTES,
+  GitHubDiffDataError,
   GitHubRateLimitError,
   createGitHubApi,
   createIssueMutationHelpers,
@@ -651,7 +652,12 @@ export async function reviewDependencyChanges(
       try {
         const token = process.env.OPENCLAW_DEPENDENCY_GUARD_AUTOSCRUB_TOKEN;
         if (!token) {
-          throw new Error("autoscrub app token was unavailable");
+          await writeSummary(
+            "## Dependency Guard\n\nAutomatic lockfile cleanup is unavailable because no write token could be created. Remove the lockfile changes manually or request maintainer approval. Final dependency review remains required.",
+          );
+          // Optional cleanup cannot grant approval; the final enforcement step
+          // still evaluates these unchanged dependency files.
+          return false;
         }
         const commit = await createAutoscrubCommit(
           { baseApi: api, writeApi: githubApi(token), guard },
@@ -673,7 +679,11 @@ export async function reviewDependencyChanges(
         await writeSummary(body);
         return true;
       } catch (error) {
-        if (error instanceof GitHubRateLimitError || error instanceof SupersededReviewError) {
+        if (
+          error instanceof GitHubRateLimitError ||
+          error instanceof GitHubDiffDataError ||
+          error instanceof SupersededReviewError
+        ) {
           throw error;
         }
         autoscrubStatus = {

@@ -28,8 +28,12 @@ import {
   createSelectedNodeTestShardBundles,
   isPolicyTestOwnedPath,
   nodeTestConfigRequiresCanonicalMetadata,
+  isToolingTestOwnerPath,
   packNodeTestGroups,
   resolvePolicyTestTargets,
+  RELEASE_ONLY_TOOLING_CONFIGS,
+  isReleaseOnlyToolingTestFile,
+  isRuntimeTestFileIncluded,
   type NodeTestShardGroup,
 } from "./ci-node-test-plan.mts";
 import { isCiProofTestFile } from "./ci-proof-test-inventory.mts";
@@ -101,7 +105,9 @@ const MAX_CHANGED_NODE_TEST_TARGETS = 96;
 // Each target runs in its own child process (isolation contract), so bound the
 // serial tail per job; the shard runner overlaps two children at a time.
 const CHANGED_NODE_TEST_TARGETS_PER_JOB = 12;
-const CHANGED_EXTENSION_JOB_SECONDS = 240;
+// Share the 45–60s runner setup across more unchanged serial envelopes.
+// Runtime preparation and native-worker file ceilings remain separate admission limits.
+const CHANGED_EXTENSION_JOB_SECONDS = 300;
 const MAX_CHANGED_EXTENSION_FALLBACK_JOBS = 50;
 // Memory Core targets perform real SQLite/indexing work. Two concurrent Vitest
 // processes starve each other on 4-vCPU runners and push otherwise healthy
@@ -666,6 +672,8 @@ export function createChangedNodeTestShards(
   changedPaths: string[],
   options: CwdOptions & {
     runnerBackend?: string;
+    includeReleaseOnlyToolingShards?: boolean;
+    includeReleaseOnlyRuntimeTests?: boolean;
     dedicatedContractShards?: readonly { task: string; includePatterns: readonly string[] }[];
     dedicatedUiE2e?: boolean;
     dedicatedMaxLinesRatchet?: boolean;
@@ -681,6 +689,13 @@ export function createChangedNodeTestShards(
     return fallback("missing changed paths");
   }
 
+  if (
+    options.includeReleaseOnlyToolingShards === false &&
+    changedPaths.some(isToolingTestOwnerPath)
+  ) {
+    return fallback("tooling owner change requires full-family coverage");
+  }
+
   // Packing changes and their policy guard need the complete compact plan on
   // Blacksmith while preserving hosted targeting and its registration footprint.
   if (
@@ -689,6 +704,9 @@ export function createChangedNodeTestShards(
       (file) =>
         file === "config/ci-test-timings.json" ||
         file === "scripts/lib/ci-node-test-plan.mts" ||
+        file === "scripts/lib/ci-measured-compact-packing.mts" ||
+        file === "scripts/lib/ci-test-timings.mts" ||
+        file === "scripts/lib/vitest-shard-metadata.mts" ||
         file === "test/scripts/ci-node-test-plan.test.ts",
     )
   ) {
@@ -772,6 +790,9 @@ export function createChangedNodeTestShards(
     ? createNodeTestShardBundles({
         changedPaths,
         includeReleaseOnlyPluginShards: false,
+        // Explicit UI consumers retain their complete canonical host-contract rows.
+        includeReleaseOnlyToolingShards: true,
+        includeReleaseOnlyRuntimeTests: options.includeReleaseOnlyRuntimeTests,
         compactMode: "pull-request",
         runnerBackend: options.runnerBackend,
       })
@@ -817,6 +838,9 @@ export function createChangedNodeTestShards(
   }
   const targetPlans = resolvedTargetPlans.filter(
     ({ target, plans }) =>
+      (options.includeReleaseOnlyToolingShards !== false ||
+        (!isReleaseOnlyToolingTestFile(target) &&
+          !plans.every((plan) => RELEASE_ONLY_TOOLING_CONFIGS.has(plan.config)))) &&
       !plans.every(({ config }) =>
         uiShards.some((shard) =>
           shard.groups?.some(
@@ -830,7 +854,14 @@ export function createChangedNodeTestShards(
   );
   // Resolve every changed source first, then defer only named complete proofs.
   // Filtering inputs earlier would hide an unresolved companion or helper.
-  const prTargetPlans = targetPlans.filter(({ target }) => !isCiProofTestFile(target));
+  const runtimeSelection = {
+    changedPaths: livePaths,
+    includeReleaseOnlyRuntimeTests: options.includeReleaseOnlyRuntimeTests,
+  };
+  const prTargetPlans = targetPlans.filter(
+    ({ target }) =>
+      !isCiProofTestFile(target) && isRuntimeTestFileIncluded(target, runtimeSelection, cwd),
+  );
   const onlyDeferredProofTargets = targetPlans.length > 0 && prTargetPlans.length === 0;
   const canonicalTargets = prTargetPlans
     .filter(({ plans }) =>
@@ -843,6 +874,7 @@ export function createChangedNodeTestShards(
     ? path.resolve(cwd) === process.cwd()
       ? createSelectedNodeTestShardBundles(canonicalTargets, {
           runnerBackend: options.runnerBackend,
+          ...runtimeSelection,
         })
       : null
     : [];
@@ -906,7 +938,7 @@ export function createChangedNodeTestShards(
     ...boundaryShards,
   ];
   // Covered source targets keep build-artifacts ownership even with no Node rows.
-  return shards.length > 0 || targets.length < targetPlans.length
+  return shards.length > 0 || targets.length < resolvedTargetPlans.length
     ? shards
     : fallback("no executable Node owner");
 }
