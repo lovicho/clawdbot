@@ -31,6 +31,7 @@ import { captureEnv, withEnvAsync } from "../test-utils/env.js";
 import { ExpectedCliError } from "./failure-output.js";
 import { getGatewayRunRuntimeHooks } from "./gateway-cli/runtime-hooks.js";
 import type { RootHelpRenderOptions } from "./program/root-help.js";
+import { registerBareRootArgumentTests } from "./run-main.bare-root.test-support.js";
 import {
   makeProxyHandle,
   registerRunMainProxyExitTests,
@@ -87,8 +88,6 @@ const getActiveMcpLoopbackRuntimeMock = vi.hoisted(() =>
   vi.fn<() => { port: number } | undefined>(() => undefined),
 );
 const closeMcpLoopbackServerMock = vi.hoisted(() => vi.fn(async () => {}));
-const ensureTaskRegistryReadyMock = vi.hoisted(() => vi.fn());
-const startTaskRegistryMaintenanceMock = vi.hoisted(() => vi.fn());
 const outputRootHelpMock = vi.hoisted(() => vi.fn());
 const outputPrecomputedRootHelpTextMock = vi.hoisted(() => vi.fn(() => false));
 const outputPrecomputedBrowserHelpTextMock = vi.hoisted(() => vi.fn(() => false));
@@ -373,14 +372,6 @@ vi.mock("../gateway/mcp-http.loopback-runtime.js", () => ({
 
 vi.mock("../gateway/mcp-http.js", () => ({
   closeMcpLoopbackServer: closeMcpLoopbackServerMock,
-}));
-
-vi.mock("../tasks/task-registry.js", () => ({
-  ensureTaskRegistryReady: ensureTaskRegistryReadyMock,
-}));
-
-vi.mock("../tasks/task-registry.maintenance.js", () => ({
-  startTaskRegistryMaintenance: startTaskRegistryMaintenanceMock,
 }));
 
 vi.mock("./program/root-help.js", () => ({
@@ -817,8 +808,6 @@ describe("runCli exit behavior", () => {
     expect(routeOrder).toBeGreaterThan(captureOrder);
     expect(closeActiveMemorySearchManagersMock).not.toHaveBeenCalled();
     expect(disposeRegisteredAgentHarnessesMock).not.toHaveBeenCalled();
-    expect(ensureTaskRegistryReadyMock).not.toHaveBeenCalled();
-    expect(startTaskRegistryMaintenanceMock).not.toHaveBeenCalled();
     expect(exitSpy).not.toHaveBeenCalled();
     exitSpy.mockRestore();
   });
@@ -3168,21 +3157,15 @@ describe("runCli exit behavior", () => {
     });
   });
 
-  it("points noninteractive fresh bare root invocations to onboarding automation", async () => {
-    readConfigFileSnapshotMock.mockResolvedValueOnce({
-      exists: false,
-      valid: true,
-      sourceConfig: {},
-    });
-
-    await expectNonInteractiveBareCliError(
-      "Onboarding needs an interactive TTY. Use `openclaw onboard --non-interactive --accept-risk ...` for automation.",
-      () => {
-        expect(setupWizardCommandMock).not.toHaveBeenCalled();
-        expect(tryRouteCliMock).not.toHaveBeenCalled();
-        expect(buildProgramMock).not.toHaveBeenCalled();
-      },
-    );
+  registerBareRootArgumentTests({
+    runCli: (argv) => runCli(argv),
+    readConfigFileSnapshotMock,
+    buildProgramMock,
+    setupWizardCommandMock,
+    runTuiMock,
+    tryRouteCliMock,
+    withInteractiveTty,
+    expectNonInteractiveBareCliError,
   });
 
   it("starts the gateway-backed TUI for bare root invocations when config already exists", async () => {
